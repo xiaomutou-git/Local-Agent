@@ -22,11 +22,30 @@ public class ReminderScheduler {
         Thread t = new Thread(r, "reminder-tick"); t.setDaemon(true); return t;
     });
     private Consumer<Reminder> onFire;
+    /** 启动后首轮扫描的过期提醒汇总回调（P0-4：关机期间积压的提醒合并成一条通知，避免逐条刷屏）。 */
+    private Consumer<List<Reminder>> onCatchUp;
+    /** 是否尚未执行首轮扫描（首轮触发汇总补发，之后恢复逐条实时提醒）。 */
+    private volatile boolean firstScan = true;
 
     public record Reminder(String id, String text, long due, String repeat, long createdAt) {}
 
+    /**
+     * 初始化调度（无汇总回调重载，首轮过期项仍逐条触发）。
+     * @param onFire 单条提醒到期回调
+     */
     public void init(Consumer<Reminder> onFire) {
+        init(onFire, null);
+    }
+
+    /**
+     * 初始化调度。首轮扫描（initialDelay=0，应用启动即执行）若发现关机期间
+     * 积压的到期提醒，整体交给 onCatchUp 汇总成一条通知；其后恢复逐条 onFire。
+     * @param onFire    单条提醒实时到期回调
+     * @param onCatchUp 启动补发汇总回调（可为 null，null 时首轮也逐条触发）
+     */
+    public void init(Consumer<Reminder> onFire, Consumer<List<Reminder>> onCatchUp) {
         this.onFire = onFire;
+        this.onCatchUp = onCatchUp;
         exec.scheduleAtFixedRate(this::tick, 0, 10, TimeUnit.SECONDS);
     }
 
@@ -105,15 +124,30 @@ public class ReminderScheduler {
         try (Statement st = Db.get().createStatement(); ResultSet rs = st.executeQuery("SELECT * FROM reminders WHERE due <= " + now)) {
             while (rs.next()) due.add(map(rs));
         } catch (Exception ignored) { return; }
+        // 首轮扫描 = 应用刚启动：关机期间积压项合并为一条汇总通知，避免开屏连弹
+        boolean catchUp = firstScan;
+        firstScan = false;
+        if (catchUp && onCatchUp != null && !due.isEmpty()) {
+            try { onCatchUp.accept(List.copyOf(due)); } catch (Exception ignored) {}
+        }
         for (Reminder r : due) {
-            if (onFire != null) { try { onFire.accept(r); } catch (Exception ignored) {} }
+            if (!catchUp || onCatchUp == null) {
+                if (onFire != null) { try { onFire.accept(r); } catch (Exception ignored) {} }
+            }
             history(r.text(), r.repeat());
-            Long next = switch (r.repeat()) {
-                case "hourly" -> r.due() + 3600_000L;
-                case "daily" -> r.due() + 86_400_000L;
-                case "weekly" -> r.due() + 7 * 86_400_000L;
+            // 重复周期：关机跨多个周期时，旧逻辑只推进一格会在随后每 10 秒
+            // 连续补触发（刷屏）；这里一路推进到严格晚于当前的下一个周期点
+            Long period = switch (r.repeat()) {
+                case "hourly" -> 3600_000L;
+                case "daily" -> 86_400_000L;
+                case "weekly" -> 7 * 86_400_000L;
                 default -> null;
             };
+            Long next = null;
+            if (period != null) {
+                next = r.due() + period;
+                while (next <= now) next += period;
+            }
             try {
                 if (next != null) {
                     try (PreparedStatement ps = Db.get().prepareStatement("UPDATE reminders SET due=? WHERE id=?")) {

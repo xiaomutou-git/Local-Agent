@@ -71,6 +71,7 @@ public class Tools {
             td("read_file", "以 UTF-8 读取文本文件（50MB 以内）。读取敏感目录（如 .ssh）或凭据文件时需确认。", "auto"),
             td("list_drives", "列出电脑所有磁盘分区及可用空间。", "auto"),
             td("get_system_info", "获取操作系统、CPU 核数、内存、用户名等信息。", "auto"),
+            td("get_current_time", "获取当前系统日期与时间（含星期、时区、与 UTC 的偏移、Unix 时间戳）。用户提到今天/明天/后天/下周一/几点几分等相对时间，或需要设置时间相关提醒时，应先调用本工具确认基准时间。", "auto"),
             td("write_file", "创建或覆盖写入文本文件（单次最多 10MB）。", "confirm"),
             td("create_directory", "创建目录（含父目录）。", "confirm"),
             td("copy_file", "复制文件。源与目标均校验保护目录。", "confirm"),
@@ -112,6 +113,7 @@ public class Tools {
                 case "read_file" -> readFile(args);
                 case "list_drives" -> listDrives(args);
                 case "get_system_info" -> systemInfo(args);
+                case "get_current_time" -> currentTime(args);
                 case "write_file" -> writeFile(args);
                 case "create_directory" -> createDirectory(args);
                 case "copy_file" -> copyFile(args, false);
@@ -396,6 +398,12 @@ public class Tools {
         String q = str(a.get("query"));
         if (q == null || q.isBlank()) return ToolResult.error("缺少 query。");
         int limit = Math.max(1, Math.min(intArg(a.get("limit"), 5), 20));
+        // 索引后台构建期间不阻塞等待：明确告知模型稍后重试，而不是误报"没有相关内容"
+        if (!knowledge.isReady()) {
+            return ToolResult.ok(knowledge.isIndexing()
+                    ? "知识库正在后台建立索引，请稍后（约十几秒）再次检索。"
+                    : "知识库索引尚未就绪，请稍后再试；若持续如此请在设置中点击「重建索引」。");
+        }
         var results = knowledge.search(q, limit);
         if (results.isEmpty()) return ToolResult.ok("知识库中没有找到相关内容。");
         StringBuilder sb = new StringBuilder("知识库检索结果：\n");
@@ -453,6 +461,30 @@ public class Tools {
             } catch (Exception e) { sb.append(root).append('\n'); }
         }
         return ToolResult.ok(sb.toString().trim());
+    }
+
+    /**
+     * 返回当前系统时间的多格式描述。
+     * 执行逻辑：直接读取系统默认时区的当前时刻，格式化为本地文本、ISO-8601 与
+     * Unix 秒，供模型解析"明天/下周一"等相对时间表达并换算提醒时刻。
+     * @param a 工具参数（本工具无参数，传入空 Map 即可）
+     * @return 始终 ok；包含本地日期时间、中文星期、时区 ID、UTC 偏移、Unix 秒
+     */
+    private ToolResult currentTime(Map<String, Object> a) {
+        java.time.ZonedDateTime now = java.time.ZonedDateTime.now();
+        String[] weekdays = {"星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"};
+        String week = weekdays[now.getDayOfWeek().getValue() - 1];
+        DateTimeFormatter f = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+        String offset = now.getOffset().getId();
+        return ToolResult.ok("""
+                当前系统时间：%s %s
+                时区：%s（UTC%s）
+                ISO-8601：%s
+                Unix 时间戳（秒）：%d
+                说明：用户提到的今天/明天/后天/星期几/几点几分等相对时间，均以上述时间为基准换算。""".formatted(
+                f.format(now), week, now.getZone().getId(),
+                "+00:00".equals(offset) ? "+00:00" : offset,
+                now.toInstant().toString(), now.toEpochSecond()));
     }
 
     private ToolResult systemInfo(Map<String, Object> a) {

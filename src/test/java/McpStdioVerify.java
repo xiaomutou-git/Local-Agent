@@ -12,11 +12,14 @@ import com.localagent.tools.Tools;
 import com.localagent.util.Json;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 /**
  * MCP 离线 stdio 传输端到端回归。
@@ -26,7 +29,7 @@ import java.util.Map;
  *    enabled=false 静默跳过；command 不存在的服务启动失败但不影响其他服务；
  * 2. 真实子进程链路：以当前 JBR 启动 {@link FakeMcpServer}，完成 initialize ->
  *    tools/list -> tools/call（成功文本、isError 业务失败、JSON-RPC error）；
- * 3. 目录接线：发现登记数量、risk 固定 confirm、Schema 透传、与本地 36 工具合并；
+ * 3. 目录接线：发现登记数量、risk 固定 confirm、Schema 透传、与本地 37 工具合并；
  * 4. 生命周期：shutdown 后子进程客户端移除，调用降级为"未连接"结构化错误。
  */
 public class McpStdioVerify {
@@ -46,6 +49,42 @@ public class McpStdioVerify {
     }
 
     /**
+     * 递归删除临时目录（best-effort，静默）：按路径倒序先删文件再删空目录，
+     * 遇 Windows 文件锁做短暂重试。
+     * 不输出 stderr：build.ps1 以 EAP=Stop 运行测试，原生进程 stderr 会被
+     * 包装成终止错误导致整轮构建中断。
+     * @param root 待删除目录；为 null 或不存在时直接返回
+     */
+    static void deleteRecursively(Path root) {
+        if (root == null || !Files.exists(root)) return;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            boolean remaining = false;
+            try (Stream<Path> walk = Files.walk(root)) {
+                for (Path p : walk.sorted(Comparator.reverseOrder()).toList()) {
+                    try { Files.deleteIfExists(p); } catch (IOException e) { remaining = true; }
+                }
+            } catch (IOException e) {
+                return;
+            }
+            if (!remaining || !Files.exists(root)) return;
+            try { Thread.sleep(120); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
+        }
+    }
+
+    /**
+     * 注册 JVM 退出清理钩子：先关闭 SQLite 连接释放 wal 锁，再递归删目录。
+     * 本回归经 summarize() 以 System.exit 结束且存在提前 return 的环境检查
+     * 分支（try/finally 无法统一覆盖），用 shutdown hook 保证零残留。
+     * @param dir 退出时递归删除的临时目录
+     */
+    static void cleanupOnExit(Path dir) {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            Db.close();
+            deleteRecursively(dir);
+        }, "test-cleanup"));
+    }
+
+    /**
      * 回归入口。
      * @param args 未使用
      * @throws Exception 测试环境准备失败时抛出（属测试设施错误）
@@ -55,6 +94,7 @@ public class McpStdioVerify {
         System.setOut(new java.io.PrintStream(System.out, true, StandardCharsets.UTF_8));
 
         Path dir = Files.createTempDirectory("localagent-mcptest");
+        cleanupOnExit(dir);
         Db.init(dir);
         Config.init();
 
@@ -126,7 +166,7 @@ public class McpStdioVerify {
         t("boom 工具已登记", catalog.get(boomQn) != null);
 
         List<ToolDef> merged = catalog.merge(new Tools(null, null, null, null, null).list());
-        t("本地 36 + 外部 2 = 38 合并", merged.size() == 38);
+        t("本地 37 + 外部 2 = 39 合并", merged.size() == 39);
         t("合并列表含 echo 限定名", merged.stream().anyMatch(d -> echoQn.equals(d.name())));
 
         // ---- 4) 真实 tools/call：成功 / isError / JSON-RPC error ----

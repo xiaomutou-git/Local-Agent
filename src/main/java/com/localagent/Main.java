@@ -27,11 +27,35 @@ import java.nio.file.Path;
  * -> TTS/记忆/Ollama/工具/Agent -> Swing 界面 -> 状态轮询。
  */
 public class Main {
+    /** 单实例锁：静态持有至进程结束（不可在 main 返回时释放——Swing EDT 会让 JVM 继续运行）。 */
+    private static com.localagent.system.SingleInstance instanceLock;
+
     public static void main(String[] args) {
         try { UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName()); } catch (Exception ignored) {}
         UiTheme.applyGlobal();
 
         Path dataDir = Path.of(System.getProperty("user.home"), "AppData", "Roaming", "本机助手", "data");
+        // P0-7：最先获取单实例锁，避免多开引发 SQLite 并发写、提醒重复触发
+        try {
+            instanceLock = com.localagent.system.SingleInstance.tryAcquire(dataDir.resolve("app.lock"));
+        } catch (Exception e) {
+            JOptionPane.showMessageDialog(null,
+                    "启动失败：" + e.getMessage(), "本机助手", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        if (instanceLock == null) {
+            JOptionPane.showMessageDialog(null,
+                    "本机助手已经在运行中，请勿重复启动。", "本机助手", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        runApp(dataDir);
+    }
+
+    /**
+     * 应用主体启动流程（持有单实例锁期间执行）。
+     * @param dataDir 应用数据目录（SQLite/配置/知识索引/锁文件所在）
+     */
+    private static void runApp(Path dataDir) {
         // Db.init 内部完成旧版 schema 迁移；迁移发生时把旧 messages 表历史回填到 data blob，
         // 否则旧库升级后所有会话读写都会因缺 data 列失败（界面表现为发消息无回应）
         boolean migrated = Db.init(dataDir);
@@ -64,8 +88,11 @@ public class Main {
         SwingUtilities.invokeLater(() -> {
             MainFrame frame = new MainFrame(agent, ollama, memory, scheduler, knowledge, mcp);
             agent.setUi(frame.callback());
+            // P0-4：实时到期逐条气泡；启动首轮扫描到的关机期间积压项合并一条补发通知
             scheduler.init(reminder ->
-                SwingUtilities.invokeLater(() -> frame.notifyReminder(reminder.text())));
+                SwingUtilities.invokeLater(() -> frame.notifyReminder(reminder.text())),
+                missed ->
+                SwingUtilities.invokeLater(() -> frame.notifyCatchUp(missed)));
             frame.setVisible(true);
             frame.initialRefresh();
         });

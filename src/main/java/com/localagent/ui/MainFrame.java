@@ -49,6 +49,8 @@ public final class MainFrame extends JFrame {
     private final transient Object approvalLock = new Object();
 
     private String activeConvId;
+    /** 与 convModel 逐行对齐的会话 ID 列表，避免靠标题反查（重名会错位）。 */
+    private final transient java.util.List<String> convIds = new ArrayList<>();
     private final transient Map<String, String> convIdToTitle = new LinkedHashMap<>();
     private transient TrayIcon trayIcon;
 
@@ -60,11 +62,14 @@ public final class MainFrame extends JFrame {
         this.mcpManager = mcpManager;
         setSize(1200, 820);
         setMinimumSize(new Dimension(960, 640));
-        setDefaultCloseOperation(EXIT_ON_CLOSE);
+        // P0-4：关窗不直接退出（否则最小化到托盘后提醒调度会随之终止），
+        // 统一交给 windowClosing 处理器按配置决定隐藏或退出
+        setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
         setLocationRelativeTo(null);
         getContentPane().setBackground(UiTheme.WINDOW);
         buildUi();
         setupTray();
+        setupWindowClosing();
         new javax.swing.Timer(3000, e -> refreshStatus(false)).start();
     }
 
@@ -253,12 +258,11 @@ public final class MainFrame extends JFrame {
         convList.addListSelectionListener(e -> {
             if (e.getValueIsAdjusting()) return;
             int i = convList.getSelectedIndex();
-            if (i < 0) return;
-            String title = convModel.get(i);
-            String id = convIdToTitle.entrySet().stream()
-                    .filter(en -> en.getValue().equals(title)).map(Map.Entry::getKey).findFirst().orElse(null);
+            if (i < 0 || i >= convIds.size()) return;
+            String id = convIds.get(i);
             if (id != null && !id.equals(activeConvId)) loadConv(id);
         });
+        setupConversationMenu();
 
         // 回车发送，Shift+回车换行
         input.getInputMap().put(KeyStroke.getKeyStroke("ENTER"), "send");
@@ -292,17 +296,133 @@ public final class MainFrame extends JFrame {
         return null;
     }
 
+    /**
+     * 创建系统托盘图标与菜单（P0-4 闭环）：
+     * - 自绘 16×16 主色圆角底 + 白色「本」字图标，替代旧版全透明空图；
+     * - 双击（Windows 下 ActionEvent 即双击）恢复主窗口；
+     * - 右键菜单：显示主窗口 / 退出（真正结束进程）。
+     * 托盘不可用时静默降级（trayIcon 保持 null，通知回退为弹窗）。
+     */
     private void setupTray() {
         if (!SystemTray.isSupported()) return;
         try {
-            java.awt.Image img = new java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB);
-            trayIcon = new TrayIcon(img, "本机助手");
+            trayIcon = new TrayIcon(createTrayImage(), "本机助手");
+            trayIcon.setImageAutoSize(true);
+            PopupMenu menu = new PopupMenu();
+            MenuItem showItem = new MenuItem("显示主窗口");
+            showItem.addActionListener(e -> restoreFromTray());
+            MenuItem exitItem = new MenuItem("退出");
+            exitItem.addActionListener(e -> exitApp());
+            menu.add(showItem);
+            menu.addSeparator();
+            menu.add(exitItem);
+            trayIcon.setPopupMenu(menu);
+            trayIcon.addActionListener(e -> restoreFromTray());
             SystemTray.getSystemTray().add(trayIcon);
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+            trayIcon = null;
+        }
     }
 
+    /**
+     * 自绘托盘位图：主色圆角方块 + 白色「本」字（16px，SansSerif 粗体）。
+     * @return 绘制完成的 ARGB 位图
+     */
+    private static java.awt.Image createTrayImage() {
+        int size = 16;
+        var img = new java.awt.image.BufferedImage(size, size, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = img.createGraphics();
+        try {
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+            g.setColor(UiTheme.PRIMARY);
+            g.fillRoundRect(0, 0, size, size, 5, 5);
+            g.setColor(Color.WHITE);
+            g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 11));
+            FontMetrics fm = g.getFontMetrics();
+            String glyph = "本";
+            int tx = (size - fm.stringWidth(glyph)) / 2;
+            int ty = (size - fm.getHeight()) / 2 + fm.getAscent() - 1;
+            g.drawString(glyph, tx, ty);
+        } finally {
+            g.dispose();
+        }
+        return img;
+    }
+
+    /**
+     * 注册关窗行为：开启「最小化到托盘」且托盘可用时隐藏窗口并仅首次弹出
+     * 托盘气泡提示恢复方式；否则真正退出。
+     */
+    private void setupWindowClosing() {
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            private boolean hintShown = false;
+            @Override public void windowClosing(java.awt.event.WindowEvent e) {
+                if (Config.getBool("minimizeToTray", true) && trayIcon != null) {
+                    setVisible(false);
+                    if (!hintShown) {
+                        hintShown = true;
+                        trayIcon.displayMessage("本机助手仍在后台运行",
+                                "窗口已最小化到托盘，提醒与定时任务会继续执行。双击托盘图标可恢复，右键可退出。",
+                                TrayIcon.MessageType.INFO);
+                    }
+                } else {
+                    exitApp();
+                }
+            }
+        });
+    }
+
+    /** 从托盘恢复主窗口：显示、还原最小化状态并置顶抢焦点。 */
+    private void restoreFromTray() {
+        setVisible(true);
+        if (getState() == ICONIFIED) setState(NORMAL);
+        toFront();
+        requestFocus();
+    }
+
+    /**
+     * 真正退出应用：守护线程随 JVM 结束，MCP 子进程由 shutdown hook 清理。
+     */
+    private void exitApp() {
+        if (trayIcon != null) SystemTray.getSystemTray().remove(trayIcon);
+        System.exit(0);
+    }
+
+    /**
+     * 单条提醒到期通知：优先托盘气泡；托盘不可用时退化为非模态弹窗，
+     * 保证提醒在无托盘环境下仍然触达（不用 Dialog 阻塞调度线程）。
+     * @param text 提醒内容
+     */
     public void notifyReminder(String text) {
-        if (trayIcon != null) trayIcon.displayMessage("本机助手提醒", text, TrayIcon.MessageType.INFO);
+        if (trayIcon != null) {
+            trayIcon.displayMessage("本机助手提醒", text, TrayIcon.MessageType.INFO);
+        } else {
+            JOptionPane.showMessageDialog(this, text, "本机助手提醒", JOptionPane.INFORMATION_MESSAGE);
+        }
+    }
+
+    /**
+     * 启动补发：把关机期间积压的多条到期提醒合并为一条托盘通知
+     * （最多展示前 3 条，其余以数量概括），避免开屏连弹一串气泡。
+     * @param reminders 首轮扫描到的全部到期提醒
+     */
+    public void notifyCatchUp(java.util.List<ReminderScheduler.Reminder> reminders) {
+        if (reminders == null || reminders.isEmpty()) return;
+        StringBuilder sb = new StringBuilder("你有 ").append(reminders.size()).append(" 条到期提醒：");
+        int shown = Math.min(3, reminders.size());
+        for (int i = 0; i < shown; i++) {
+            String t = reminders.get(i).text();
+            if (t.length() > 40) t = t.substring(0, 40) + "…";
+            sb.append("\n· ").append(t);
+        }
+        if (reminders.size() > shown) sb.append("\n…等 ").append(reminders.size()).append(" 条");
+        if (trayIcon != null) {
+            trayIcon.displayMessage("本机助手提醒（未读补发）", sb.toString(), TrayIcon.MessageType.INFO);
+        } else {
+            JOptionPane.showMessageDialog(this, sb.toString(), "本机助手提醒（未读补发）",
+                    JOptionPane.INFORMATION_MESSAGE);
+        }
     }
 
     // ================= 发送 / 会话 =================
@@ -366,17 +486,146 @@ public final class MainFrame extends JFrame {
 
     private void refreshConversations() {
         convIdToTitle.clear();
+        convIds.clear();
         convModel.clear();
         int selected = -1, i = 0;
         for (var c : agent.listConversations()) {
             String id = String.valueOf(c.get("id"));
             String title = String.valueOf(c.get("title"));
             convIdToTitle.put(id, title);
+            convIds.add(id);
             convModel.addElement(title);
             if (id.equals(activeConvId)) selected = i;
             i++;
         }
         if (selected >= 0) convList.setSelectedIndex(selected);
+    }
+
+    /**
+     * 会话列表右键菜单：重命名 / 导出 Markdown / 删除。
+     * 执行逻辑：右键按下时先选中所在行（与主流 IM/笔记应用一致），
+     * 再弹出菜单；菜单动作按选中行对应的会话 ID 执行。
+     */
+    private void setupConversationMenu() {
+        JPopupMenu menu = new JPopupMenu();
+        JMenuItem renameItem = new JMenuItem("重命名");
+        JMenuItem exportItem = new JMenuItem("导出为 Markdown");
+        JMenuItem deleteItem = new JMenuItem("删除会话");
+        menu.add(renameItem);
+        menu.add(exportItem);
+        menu.addSeparator();
+        menu.add(deleteItem);
+        renameItem.addActionListener(e -> renameSelectedConversation());
+        exportItem.addActionListener(e -> exportSelectedConversation());
+        deleteItem.addActionListener(e -> deleteSelectedConversation());
+        convList.setComponentPopupMenu(menu);
+        convList.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override public void mousePressed(java.awt.event.MouseEvent e) { selectAtPoint(e); }
+            @Override public void mouseReleased(java.awt.event.MouseEvent e) { selectAtPoint(e); }
+            private void selectAtPoint(java.awt.event.MouseEvent e) {
+                int idx = convList.locationToIndex(e.getPoint());
+                if (idx >= 0 && !convList.isSelectedIndex(idx)) convList.setSelectedIndex(idx);
+            }
+        });
+    }
+
+    /**
+     * 取列表当前选中行对应的会话 ID。
+     * @return 会话 ID；无选中或索引越界时返回 null
+     */
+    private String selectedConversationId() {
+        int i = convList.getSelectedIndex();
+        if (i < 0 || i >= convIds.size()) return null;
+        return convIds.get(i);
+    }
+
+    /**
+     * 重命名当前选中会话：弹出预填旧标题的输入框，确认后写库并刷新列表。
+     */
+    private void renameSelectedConversation() {
+        String id = selectedConversationId();
+        if (id == null) return;
+        String old = agent.conversationTitle(id);
+        String name = (String) JOptionPane.showInputDialog(this, "输入新的会话名称：",
+                "重命名会话", JOptionPane.PLAIN_MESSAGE, null, null, old == null ? "" : old);
+        if (name == null) return;
+        name = name.strip();
+        if (name.isEmpty() || name.equals(old)) return;
+        try {
+            agent.renameConversation(id, name.length() > 40 ? name.substring(0, 40) : name);
+            refreshConversations();
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "重命名失败：" + ex.getMessage(),
+                    "操作失败", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    /**
+     * 导出当前选中会话为 .md 文件：弹保存框（默认名取标题并清洗文件名字符），
+     * 以 UTF-8 写入用户选择的路径。
+     */
+    private void exportSelectedConversation() {
+        String id = selectedConversationId();
+        if (id == null) return;
+        String md = agent.exportConversationMarkdown(id);
+        if (md == null) {
+            JOptionPane.showMessageDialog(this, "会话不存在或已被删除。",
+                    "导出失败", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        String title = agent.conversationTitle(id);
+        JFileChooser chooser = new JFileChooser();
+        chooser.setSelectedFile(new java.io.File(safeFileName(title) + ".md"));
+        if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        java.io.File target = chooser.getSelectedFile();
+        if (!target.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".md")) {
+            target = new java.io.File(target.getParentFile(), target.getName() + ".md");
+        }
+        try {
+            java.nio.file.Files.writeString(target.toPath(), md,
+                    java.nio.charset.StandardCharsets.UTF_8);
+            JOptionPane.showMessageDialog(this, "已导出：\n" + target.getAbsolutePath(),
+                    "导出成功", JOptionPane.INFORMATION_MESSAGE);
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "导出失败：" + ex.getMessage(),
+                    "操作失败", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    /**
+     * 删除当前选中会话：二次确认（明示不可恢复）；删除的是当前会话时
+     * 自动新建空白会话并重置聊天区，避免界面停留在已删除内容上。
+     */
+    private void deleteSelectedConversation() {
+        String id = selectedConversationId();
+        if (id == null) return;
+        String title = agent.conversationTitle(id);
+        int ok = JOptionPane.showConfirmDialog(this,
+                "确定删除会话「" + (title == null ? "" : title) + "」吗？此操作不可恢复。",
+                "删除会话", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (ok != JOptionPane.OK_OPTION) return;
+        try {
+            agent.removeConversation(id);
+            if (id.equals(activeConvId)) {
+                activeConvId = agent.newConversation();
+                chatPane.reset();
+            }
+            refreshConversations();
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "删除失败：" + ex.getMessage(),
+                    "操作失败", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    /**
+     * 把会话标题清洗为合法文件名（Windows 非法字符替换为下划线，空名兜底）。
+     * @param title 原始标题
+     * @return 可用于文件名的非空字符串（不含扩展名）
+     */
+    private static String safeFileName(String title) {
+        if (title == null || title.isBlank()) return "会话导出";
+        String s = title.replaceAll("[\\\\/:*?\"<>|\\r\\n]", "_").strip();
+        return (s.isEmpty() ? "会话导出" : (s.length() > 80 ? s.substring(0, 80) : s));
     }
 
     // ================= Agent 回调 =================

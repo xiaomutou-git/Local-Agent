@@ -37,6 +37,12 @@ public final class Config {
         DEFAULTS.put("knowledgeDir", "D:/知识库");
         DEFAULTS.put("memoryDir", "");
         DEFAULTS.put("requireConfirm", true);
+        // 关闭窗口时最小化到系统托盘（而非退出进程），保证提醒调度持续运行；
+        // 托盘菜单提供真正的「退出」。托盘不可用时该设置自动失效（关窗即退出）
+        DEFAULTS.put("minimizeToTray", true);
+        // 开机自动启动（写 HKCU\Software\Microsoft\Windows\CurrentVersion\Run，
+        // 仅当前用户、无需管理员；由设置面板保存时实际同步注册表）
+        DEFAULTS.put("autoStart", false);
         DEFAULTS.put("thinking", false);
         DEFAULTS.put("ttsEnabled", false);
         DEFAULTS.put("planMode", false);

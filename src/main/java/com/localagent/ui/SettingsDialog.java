@@ -33,11 +33,16 @@ final class SettingsDialog extends JDialog {
     private final JTextField baseUrl = new JTextField(28);
     private final JTextField model = new JTextField(28);
     private final JCheckBox requireConfirm = new JCheckBox("普通操作也需确认");
+    private final JCheckBox minimizeToTray = new JCheckBox("关闭窗口时最小化到托盘（提醒继续运行）");
+    private final JCheckBox autoStart = new JCheckBox("开机自动启动（登录后后台静默运行）");
     private final JCheckBox memoryEnabled = new JCheckBox("启用记忆功能");
     private final JCheckBox knowledgeEnabled = new JCheckBox("启用知识库功能");
     private final JCheckBox mcpEnabled = new JCheckBox("启用 MCP 外部工具（仅本地 stdio 服务，不联网）");
     private final JTextArea mcpServers = new JTextArea(5, 34);
     private final JTextField knowledgeDir = new JTextField(28);
+    /** 知识库索引：手动重建按钮 + 当前索引统计（文件/片段/拦截数）。 */
+    private final FlatButton rebuildIndexBtn = FlatButton.ghost("重建索引");
+    private final JLabel knowledgeStats = new JLabel();
     private final JCheckBox thinking = new JCheckBox("深度思考（回答更透彻，但首字等待更久）");
     private final JTextField keepAliveMin = new JTextField(28);
 
@@ -80,6 +85,8 @@ final class SettingsDialog extends JDialog {
         addRow(form, g, row++, "Ollama 地址：", styleField(baseUrl));
         addRow(form, g, row++, "模型名：", styleField(model));
         g.gridx = 1; g.gridy = row++; styleCheck(requireConfirm); form.add(requireConfirm, g);
+        g.gridx = 1; g.gridy = row++; styleCheck(minimizeToTray); form.add(minimizeToTray, g);
+        g.gridx = 1; g.gridy = row++; styleCheck(autoStart); form.add(autoStart, g);
         g.gridx = 1; g.gridy = row++; styleCheck(memoryEnabled); form.add(memoryEnabled, g);
         g.gridx = 1; g.gridy = row++; styleCheck(knowledgeEnabled); form.add(knowledgeEnabled, g);
         g.gridx = 1; g.gridy = row++; styleCheck(mcpEnabled); form.add(mcpEnabled, g);
@@ -87,6 +94,15 @@ final class SettingsDialog extends JDialog {
         g.gridx = 1; g.gridy = row++; styleCheck(thinking); form.add(thinking, g);
         addRow(form, g, row++, "模型保活（分钟）：", styleField(keepAliveMin));
         addRow(form, g, row++, "知识库目录：", styleField(knowledgeDir));
+        // 索引行：重建按钮（后台执行）+ 文件数/片段数/拦截数实时展示
+        JPanel kbIndexRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        kbIndexRow.setOpaque(false);
+        knowledgeStats.setFont(UiTheme.font(11));
+        knowledgeStats.setForeground(UiTheme.TEXT_MUTED);
+        kbIndexRow.add(rebuildIndexBtn);
+        kbIndexRow.add(knowledgeStats);
+        g.gridx = 1; g.gridy = row++; g.fill = GridBagConstraints.HORIZONTAL;
+        form.add(kbIndexRow, g);
         add(form, BorderLayout.CENTER);
 
         FlatButton save = FlatButton.primary("保存");
@@ -98,6 +114,7 @@ final class SettingsDialog extends JDialog {
         add(btns, BorderLayout.SOUTH);
 
         loadValues();
+        refreshKnowledgeStats(knowledge);
         renderStatuses("当前连接状态：", mcpManager.statuses());
 
         save.addActionListener(e -> onSave(knowledge, save));
@@ -105,6 +122,7 @@ final class SettingsDialog extends JDialog {
         detectBtn.addActionListener(e -> detectEnvironment());
         insertBtn.addActionListener(e -> insertSelectedTemplate());
         testBtn.addActionListener(e -> testConnections());
+        rebuildIndexBtn.addActionListener(e -> rebuildKnowledgeIndex(knowledge));
 
         pack();
         setSize(520, Math.min(getHeight() + 40, 840));
@@ -118,6 +136,15 @@ final class SettingsDialog extends JDialog {
         baseUrl.setText(Config.getString("baseUrl", "http://127.0.0.1:11434"));
         model.setText(Config.getString("model", ""));
         requireConfirm.setSelected(Config.getBool("requireConfirm", true));
+        minimizeToTray.setSelected(Config.getBool("minimizeToTray", true));
+        // 开机自启仅 Windows 支持；非 Windows 禁用控件，保存也不会写注册表
+        if (com.localagent.system.AutoStart.isSupported()) {
+            autoStart.setSelected(Config.getBool("autoStart", false));
+        } else {
+            autoStart.setSelected(false);
+            autoStart.setEnabled(false);
+            autoStart.setToolTipText("仅支持 Windows 开机自启");
+        }
         memoryEnabled.setSelected(Config.getBool("memoryEnabled", false));
         knowledgeEnabled.setSelected(Config.getBool("knowledgeEnabled", false));
         mcpEnabled.setSelected(Config.getBool("mcpEnabled", false));
@@ -143,6 +170,8 @@ final class SettingsDialog extends JDialog {
             p.put("baseUrl", baseUrl.getText().trim());
             p.put("model", model.getText().trim());
             p.put("requireConfirm", requireConfirm.isSelected());
+            p.put("minimizeToTray", minimizeToTray.isSelected());
+            p.put("autoStart", autoStart.isSelected());
             p.put("memoryEnabled", memoryEnabled.isSelected());
             p.put("knowledgeEnabled", knowledgeEnabled.isSelected());
             p.put("mcpEnabled", mcpEnabled.isSelected());
@@ -156,10 +185,24 @@ final class SettingsDialog extends JDialog {
             mcpChanged = mcpEnabled.isSelected() != Config.getBool("mcpEnabled", false)
                     || !mcpJson.equals(Config.getString("mcpServers", "{}"));
             Config.set(p);
-            if (knowledgeEnabled.isSelected()) knowledge.init(knowledgeDir.getText().trim());
+            if (knowledgeEnabled.isSelected()) {
+                knowledge.init(knowledgeDir.getText().trim());
+                // init 已在后台预热新目录索引，统计行先切到忙碌态，完成回调会在重建按钮逻辑外结束；
+                // 此处直接展示构建中文案，避免残留旧目录统计
+                knowledgeStats.setText("正在后台建立索引…");
+            }
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(this, "保存失败：" + ex.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
             return;
+        }
+        // 配置已落库后再同步开机自启注册表；失败仅警告不回滚其余设置
+        if (com.localagent.system.AutoStart.isSupported()) {
+            try {
+                com.localagent.system.AutoStart.setEnabled(autoStart.isSelected());
+            } catch (Exception ex) {
+                JOptionPane.showMessageDialog(this,
+                        "开机自启未能写入注册表：" + ex.getMessage(), "警告", JOptionPane.WARNING_MESSAGE);
+            }
         }
         if (!mcpChanged) { dispose(); return; }
         // MCP 有变更：后台 reconcile，状态区实时展示，窗口保留供用户确认结果
@@ -171,6 +214,46 @@ final class SettingsDialog extends JDialog {
                 else renderStatuses("已保存并重连：", st);
             });
         });
+    }
+
+    /**
+     * 刷新知识库索引统计行（EDT 调用）：构建中显示忙碌态，就绪后展示
+     * 文件数/片段数与拦截说明。
+     * @param knowledge 知识库协作者
+     */
+    private void refreshKnowledgeStats(Knowledge knowledge) {
+        knowledgeStats.setText(renderIndexStats(knowledge));
+    }
+
+    /**
+     * 渲染知识库索引统计文案。
+     * @param knowledge 知识库协作者
+     * @return 单行中文统计；索引未建立时给出引导文案
+     */
+    private static String renderIndexStats(Knowledge knowledge) {
+        if (knowledge.isIndexing()) return "正在后台建立索引…";
+        if (!knowledge.isReady()) return "索引尚未建立，可点「重建索引」立即建立。";
+        Knowledge.Stats s = knowledge.stats();
+        String text = "已索引 " + s.files() + " 个文件 / " + s.chunks() + " 个片段";
+        if (s.error() != null && !s.error().isBlank()) text += "（" + s.error() + "）";
+        return text;
+    }
+
+    /**
+     * 点击「重建索引」：禁用按钮、后台强制重建，完成（或异常）后在 EDT 刷新统计。
+     * @param knowledge 知识库协作者
+     */
+    private void rebuildKnowledgeIndex(Knowledge knowledge) {
+        rebuildIndexBtn.setEnabled(false);
+        knowledgeStats.setText("正在重建索引…");
+        knowledge.rebuildAsync().whenComplete((stats, ex) -> SwingUtilities.invokeLater(() -> {
+            rebuildIndexBtn.setEnabled(true);
+            if (ex != null) {
+                knowledgeStats.setText("重建失败：" + ex.getMessage());
+            } else {
+                knowledgeStats.setText(renderIndexStats(knowledge));
+            }
+        }));
     }
 
     /** 后台探测 npx/uvx/python，完成后在 EDT 刷新环境行与模板下拉。 */

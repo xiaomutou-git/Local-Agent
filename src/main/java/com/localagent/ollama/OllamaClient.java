@@ -109,11 +109,20 @@ public final class OllamaClient {
     }
 
     /**
-     * 流式对话：逐行解析 SSE/NDJSON，每个完整 JSON 行回调一次。
-     * @param onLine 收到一个 JSON 事件（含 message.content 增量 / done 等）
+     * 流式对话（异步、可外部取消）：逐行解析 SSE/NDJSON，每个完整 JSON 行回调一次。
+     * 取消语义：对返回 Future 执行 {@code cancel(true)} 会被显式传导到底层
+     * sendAsync 的 exchange Future（thenAccept 派生阶段不会自动向上传播取消），
+     * JDK 随即中止 HTTP 连接，Ollama 侧停止生成并释放模型槽位；join 方将收到
+     * CompletionException(CancellationException)。
+     * @param model    模型名
+     * @param messages 完整消息列表（含 system/user/assistant/tool）
+     * @param tools    工具规格列表（null/空表示本轮不携带工具）
+     * @param onLine   收到一个 JSON 事件时的回调（含 message.content 增量 / done 等）
+     * @return 整条流消费完毕后正常完成；网络失败/非 2xx 以异常完成；被取消以 CancellationException 完成
      */
-    public void chatStream(String model, List<Map<String, Object>> messages,
-                           List<Map<String, Object>> tools, Consumer<JsonNode> onLine) {
+    public java.util.concurrent.CompletableFuture<Void> chatStreamAsync(
+            String model, List<Map<String, Object>> messages,
+            List<Map<String, Object>> tools, Consumer<JsonNode> onLine) {
         ObjectNode body = Json.mapper().createObjectNode();
         body.put("model", model);
         body.put("stream", true);
@@ -127,27 +136,39 @@ public final class OllamaClient {
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(Json.stringify(body)))
                 .build();
-        try {
-            HttpResponse<java.util.stream.Stream<String>> resp =
-                    http.send(req, HttpResponse.BodyHandlers.ofLines());
+        // 保留底层 exchange Future：派生阶段被取消时需要用它真正中止 HTTP 请求
+        java.util.concurrent.CompletableFuture<HttpResponse<java.util.stream.Stream<String>>> exchange =
+                http.sendAsync(req, HttpResponse.BodyHandlers.ofLines());
+        java.util.concurrent.CompletableFuture<Void> done = exchange.thenAccept(resp -> {
             if (resp.statusCode() / 100 != 2)
                 throw new RuntimeException("Ollama 请求失败 (" + resp.statusCode() + ")");
             final boolean[] parseWarned = {false};
-            resp.body().forEach(line -> {
-                if (line == null || line.isBlank()) return;
-                try {
-                    onLine.accept(Json.mapper().readTree(line));
-                } catch (Exception parseErr) {
-                    // 单行损坏不应中断整条流；但首次失败需留痕，避免"无回复"时无线索可查
-                    if (!parseWarned[0]) {
-                        parseWarned[0] = true;
-                        System.err.println("[ollama] 流式响应存在无法解析的行: "
-                                + parseErr.getMessage());
+            // try-with-resources 保证流（与底层订阅）在正常结束/异常/取消后均被关闭
+            try (java.util.stream.Stream<String> lines = resp.body()) {
+                lines.forEach(line -> {
+                    if (line == null || line.isBlank()) return;
+                    try {
+                        onLine.accept(Json.mapper().readTree(line));
+                    } catch (Exception parseErr) {
+                        // 单行损坏不应中断整条流；但首次失败需留痕，避免"无回复"时无线索可查
+                        if (!parseWarned[0]) {
+                            parseWarned[0] = true;
+                            System.err.println("[ollama] 流式响应存在无法解析的行: "
+                                    + parseErr.getMessage());
+                        }
                     }
-                }
-            });
-        } catch (RuntimeException e) { throw e; }
-        catch (Exception e) { throw new RuntimeException("Ollama 流式请求失败: " + e.getMessage(), e); }
+                });
+            } catch (java.io.UncheckedIOException ioErr) {
+                // 连接被取消/中断时 forEach 以 UncheckedIOException 收尾：调用方已 cancel 的
+                // 场景由其自行吞掉，其余场景包装成统一前缀异常，便于上层中文提示
+                throw new RuntimeException("Ollama 流式请求失败: " + ioErr.getMessage(), ioErr);
+            }
+        });
+        // 取消传播：派生阶段被 cancel 后，显式取消底层 exchange 才能真正断开 HTTP、停止生成
+        done.whenComplete((v, ex) -> {
+            if (ex instanceof java.util.concurrent.CancellationException) exchange.cancel(true);
+        });
+        return done;
     }
 
     /** 图片理解（视觉模型）。 */

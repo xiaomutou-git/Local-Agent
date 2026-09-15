@@ -1,8 +1,10 @@
 import com.localagent.office.Office;
 import com.localagent.tools.ToolResult;
 
+import java.io.IOException;
 import java.nio.file.*;
 import java.util.*;
+import java.util.stream.Stream;
 
 /**
  * Office OOXML 生成/读取烟测：xlsx/docx/pptx 生成 -> 读回校验关键字。
@@ -11,10 +13,43 @@ public class OfficeVerify {
     static int pass = 0, fail = 0;
     static void t(String n, boolean c) { if (c) { pass++; System.out.println("[PASS] " + n); } else { fail++; System.out.println("[FAIL] " + n); } }
 
+    /**
+     * 递归删除临时目录（best-effort，静默）：按路径倒序先删文件再删空目录，
+     * 遇 Windows 文件锁做短暂重试。
+     * 不输出 stderr：build.ps1 以 EAP=Stop 运行测试，原生进程 stderr 会被
+     * 包装成终止错误导致整轮构建中断。
+     * @param root 待删除目录；为 null 或不存在时直接返回
+     */
+    static void deleteRecursively(Path root) {
+        if (root == null || !Files.exists(root)) return;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            boolean remaining = false;
+            try (Stream<Path> walk = Files.walk(root)) {
+                for (Path p : walk.sorted(Comparator.reverseOrder()).toList()) {
+                    try { Files.deleteIfExists(p); } catch (IOException e) { remaining = true; }
+                }
+            } catch (IOException e) {
+                return;
+            }
+            if (!remaining || !Files.exists(root)) return;
+            try { Thread.sleep(120); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
+        }
+    }
+
+    /**
+     * 注册 JVM 退出清理钩子。本回归以 System.exit 结束（try/finally 不会执行），
+     * 必须通过 shutdown hook 保证 %TEMP% 下零残留。
+     * @param dir 退出时递归删除的临时目录
+     */
+    static void cleanupOnExit(Path dir) {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> deleteRecursively(dir), "test-cleanup"));
+    }
+
     public static void main(String[] args) throws Exception {
         Office office = new Office();
         Path dir = Paths.get(System.getProperty("java.io.tmpdir"), "localagent-office-test");
         Files.createDirectories(dir);
+        cleanupOnExit(dir);
 
         // xlsx
         Path xlsx = dir.resolve("t.xlsx");
@@ -51,8 +86,7 @@ public class OfficeVerify {
         ToolResult r4 = office.createDocx(bad);
         t("危险 docx 被拦截", !r4.ok() && r4.error().contains("危险"));
 
-        // 清理
-        for (String e : new String[]{"t.xlsx", "t.docx", "t.pptx"}) Files.deleteIfExists(dir.resolve(e));
+        // 临时文件由退出钩子统一递归清理（含 bad.docx 与目录本身）
 
         System.out.println("结果：" + pass + " 通过 / " + fail + " 失败");
         System.exit(fail > 0 ? 1 : 0);

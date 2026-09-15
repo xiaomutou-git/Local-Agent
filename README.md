@@ -41,16 +41,16 @@ time-jvm/
 │   ├── util/Json.java         # Jackson 封装（JSON 容错读写）
 │   └── ui/                    # Swing 主窗、设置、审计对话框、系统托盘提醒
 ├── native-c/localagent_native.c # Win32：前台窗口标题、清空回收站（约 60 行）
-├── src/test/java/             # 回归六件套 + UiVerify/UiShot（手工 UI 截图校验，不入回归）
-├── build.ps1                  # 一键构建+回归+打包（零网络）
+├── src/test/java/             # 回归 11 件套 + UiVerify/UiShot（手工 UI 截图校验，不入回归）
+├── build.ps1                  # 一键构建+回归+自带运行时+打包（零网络）
 ├── build-native.ps1/.cmd      # 可选：MSVC 编译 JNI DLL（需 Windows SDK）
-└── dist/本机助手/              # 构建产物（双击 本机助手.bat 启动）
+└── dist/本机助手/              # 构建产物（含内置 runtime，双击 本机助手.bat 启动）
 ```
 
 ## 构建与运行
 
 ```powershell
-# 一键构建（编译 + 147 项回归 + 组装 dist）
+# 一键构建（编译 + 183 项回归 + 内置运行时 + 组装 dist）
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 
 # 仅编译打包（跳过回归）
@@ -60,7 +60,10 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -SkipTests
 ```
 
 回归基线：**安全 POC 24/24、Office 往返 7/7、数据层 7/7、MCP 工具合并 35/35、
-MCP stdio 49/49、本地环境探测 25/25（共 147 项）**；
+MCP stdio 49/49、本地环境探测 25/25、进程管道 6/6、时间工具 10/10、
+会话导出 8/8、知识库索引 9/9、单实例锁 3/3（共 183 项）**；
+构建产物 `dist\本机助手\runtime` 内置完整运行时（JDK 带 jmods 时优先 jlink
+裁剪，否则复制 JBR），目标机器无需安装 JDK；
 生产代码另以 `-Xlint:all` 编译保持 **0 error / 0 warning**。
 
 ## 安全设计

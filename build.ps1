@@ -21,12 +21,49 @@ param([switch]$SkipTests)
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Jbr = 'D:\Android Studio\jbr'
-if (-not (Test-Path "$Jbr\bin\javac.exe")) { throw "未找到 JBR：$Jbr（请修改脚本中的 Jbr 路径，或设置 JAVA_HOME）" }
+# JDK 解析：本项目使用文本块/record 等 Java 21 特性，必须挑到主版本号 >= 17
+# 的 JDK；依次探测 JAVA_HOME、Android Studio 内置 JBR、PATH 上的 java，
+# 第一个版本达标的候选生效（避免旧 JAVA_HOME 如 JDK14 导致编译失败）（P0-7）
+function Get-JavaMajor {
+    param([string]$Home2)
+    # 返回指定 JDK 主版本号；不存在或无法解析时返回 0
+    $exe = Join-Path $Home2 'bin\java.exe'
+    if (-not (Test-Path $exe)) { return 0 }
+    # java -version 输在 stderr，全局 EAP=Stop 时会被包装成终止错误，
+    # 这里显式切到 Continue 收集输出
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $line = (& $exe -version 2>&1 | Select-Object -First 1 | Out-String)
+        if ($line -match 'version "(\d+)(?:\.(\d+))?') {
+            $first = [int]$Matches[1]
+            # 旧式 1.8 报 8；新式直接返回主版本号
+            if ($first -eq 1 -and $Matches[2]) { return [int]$Matches[2] }
+            return $first
+        }
+    } catch {
+        return 0
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    return 0
+}
+$candidates = @()
+if ($env:JAVA_HOME) { $candidates += $env:JAVA_HOME }
+$candidates += 'D:\Android Studio\jbr'
+$pathJava = (Get-Command java.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+if ($pathJava) { $candidates += (Resolve-Path (Join-Path (Split-Path -Parent $pathJava) '..')).Path }
+$Jbr = $null
+foreach ($c in $candidates) {
+    if ($c -and (Test-Path (Join-Path $c 'bin\javac.exe')) -and (Get-JavaMajor $c) -ge 17) { $Jbr = $c; break }
+}
+if (-not $Jbr) { throw '未找到 JDK 17+（需要 javac，且支持 record/文本块）。请设置 JAVA_HOME 指向 JDK 17 及以上版本。' }
+Write-Host "使用 JDK：$Jbr（版本 $(Get-JavaMajor $Jbr)）" -ForegroundColor DarkGray
 $Java = "$Jbr\bin\javac.exe"
 $JavaRun = "$Jbr\bin\java.exe"
+$JLink = "$Jbr\bin\jlink.exe"
 
-Write-Host '[1/4] 编译 Java 源码…' -ForegroundColor Cyan
+Write-Host '[1/5] 编译 Java 源码…' -ForegroundColor Cyan
 $Classes = Join-Path $Root 'out\classes'
 if (Test-Path $Classes) { Remove-Item $Classes -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $Classes | Out-Null
@@ -40,7 +77,7 @@ if ($jcode -ne 0) { $jout | Out-Host; throw 'Java 编译失败' }
 Write-Host '  编译通过' -ForegroundColor Green
 
 if (-not $SkipTests) {
-  Write-Host '[2/4] 回归测试…' -ForegroundColor Cyan
+  Write-Host '[2/5] 回归测试…' -ForegroundColor Cyan
   $Test = Join-Path $Root 'out\test'
   if (Test-Path $Test) { Remove-Item $Test -Recurse -Force }
   New-Item -ItemType Directory -Force -Path $Test | Out-Null
@@ -51,18 +88,18 @@ if (-not $SkipTests) {
   $tcode = $LASTEXITCODE
   $ErrorActionPreference = $nativeErr2
   if ($tcode -ne 0) { $tout | Out-Host; throw '测试代码编译失败' }
-  foreach ($t in 'SecurityVerify','OfficeVerify','DbVerify','McpMergeVerify','McpStdioVerify','LocalToolchainVerify') {
+  foreach ($t in 'SecurityVerify','OfficeVerify','DbVerify','McpMergeVerify','McpStdioVerify','LocalToolchainVerify','ProcVerify','TimeToolVerify','SessionExportVerify','KnowledgeIndexVerify','SingleInstanceVerify') {
     $rout = & $JavaRun '-Dfile.encoding=UTF-8' -cp "$Classes;$Test;$Root\lib\*" $t 2>&1
     $rcode = $LASTEXITCODE
     $rout | Select-Object -Last 2 | Out-Host
     if ($rcode -ne 0) { $rout | Out-Host; throw "$t 回归失败" }
   }
-  Write-Host '  全部回归通过（安全 24 / Office 7 / 数据层 7 / MCP 合并 35 / MCP stdio 49 / 本地环境 25，共 147）' -ForegroundColor Green
+  Write-Host '  全部回归通过（安全 24 / Office 7 / 数据层 7 / MCP 合并 35 / MCP stdio 49 / 本地环境 25 / 进程管道 6 / 时间工具 10 / 会话导出 8 / 知识索引 9 / 单实例 3，共 183）' -ForegroundColor Green
 } else {
-  Write-Host '[2/4] 跳过测试' -ForegroundColor Yellow
+  Write-Host '[2/5] 跳过测试' -ForegroundColor Yellow
 }
 
-Write-Host '[3/4] 组装分发目录…' -ForegroundColor Cyan
+Write-Host '[3/5] 组装分发目录…' -ForegroundColor Cyan
 $Dist = Join-Path $Root 'dist\本机助手'
 if (Test-Path $Dist) { Remove-Item $Dist -Recurse -Force }
 $AppDir = Join-Path $Dist 'app'
@@ -70,23 +107,65 @@ New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
 Copy-Item (Join-Path $Classes '*') $AppDir -Recurse -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $Dist 'lib') | Out-Null
 Copy-Item (Join-Path $Root 'lib\*.jar') (Join-Path $Dist 'lib')
-# 启动器
+# 启动器：优先使用随包自带的 jlink 运行时（javaw 静默无黑窗），
+# 不存在时回退 JAVA_HOME / PATH，不再硬编码开发机路径（P0-7）
 $bat = @'
 @echo off
 chcp 65001 >nul
 setlocal
-set "APP=%~dp0"
 set "JAVA_EXE="
-if exist "D:\Android Studio\jbr\bin\java.exe" set "JAVA_EXE=D:\Android Studio\jbr\bin\java.exe"
-if not defined JAVA_EXE if defined JAVA_HOME set "JAVA_EXE=%JAVA_HOME%\bin\java.exe"
-if not defined JAVA_EXE set "JAVA_EXE=java"
+if exist "%~dp0runtime\bin\javaw.exe" set "JAVA_EXE=%~dp0runtime\bin\javaw.exe"
+if not defined JAVA_EXE if defined JAVA_HOME set "JAVA_EXE=%JAVA_HOME%\bin\javaw.exe"
+if not defined JAVA_EXE set "JAVA_EXE=javaw"
 start "" "%JAVA_EXE%" -Dfile.encoding=UTF-8 "-Djava.library.path=%~dp0app" -cp "%~dp0app;%~dp0lib\*" com.localagent.Main
 endlocal
 '@
 Set-Content -Path (Join-Path $Dist '本机助手.bat') -Value $bat -Encoding Default
 Write-Host '  分发目录就绪' -ForegroundColor Green
 
-Write-Host '[4/4] Native DLL 检查…' -ForegroundColor Cyan
+Write-Host '[4/5] 生成内置运行时（免安装 JDK）…' -ForegroundColor Cyan
+$Runtime = Join-Path $Dist 'runtime'
+if (Test-Path $Runtime) { Remove-Item $Runtime -Recurse -Force }
+$linkErr = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+if (Test-Path (Join-Path $Jbr 'jmods')) {
+    # 完整 JDK（含 jmods）：用 jlink 裁剪出最小运行时
+    # 模块清单由 jdeps -R 对 classes+lib 静态分析得出：
+    # java.desktop=Swing 界面/托盘，java.net.http=Ollama 流式接口，java.sql=JDBC
+    $JModules = 'java.base,java.desktop,java.net.http,java.sql'
+    $lout = & $JLink --no-header-files --no-man-pages --compress=2 `
+        --module-path (Join-Path $Jbr 'jmods') --add-modules $JModules --output $Runtime 2>&1
+    $lcode = $LASTEXITCODE
+    if ($lcode -ne 0) { $lout | Out-Host; throw 'jlink 运行时生成失败' }
+    Write-Host '  内置运行时就绪（jlink 裁剪）' -ForegroundColor Green
+} else {
+    # 无 jmods 的运行时（典型：Android Studio 自带 JBR）：直接整体复制，
+    # 跳过 legal 文档与调试符号；JBR 基于 GPLv2+CE，允许随应用再分发，
+    # 体积大于裁剪版但同样实现「目标机器零 JDK 安装」（P0-7）
+    Write-Host '  当前 JDK 无 jmods，改用完整运行时复制方案' -ForegroundColor Yellow
+    New-Item -ItemType Directory -Force -Path $Runtime | Out-Null
+    foreach ($item in 'bin','conf','lib','release') {
+        $src = Join-Path $Jbr $item
+        if (Test-Path $src) { Copy-Item $src (Join-Path $Runtime $item) -Recurse -Force }
+    }
+    Get-ChildItem $Runtime -Recurse -File -Include *.pdb,*.map | Remove-Item -Force -ErrorAction SilentlyContinue
+    Write-Host '  内置运行时就绪（完整复制 JBR）' -ForegroundColor Green
+}
+$ErrorActionPreference = $linkErr
+$rtSize = [math]::Round(((Get-ChildItem $Runtime -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
+Write-Host "  运行时体积：$rtSize MB" -ForegroundColor DarkGray
+# 用内置运行时跑一遍数据层回归，验证运行时完整可用（sqlite JDBC/JNI 正常）；
+# -SkipTests 且无历史编译产物时跳过本项
+$DbVerifyClass = Join-Path $Root 'out\test\DbVerify.class'
+if (Test-Path $DbVerifyClass) {
+  $smoke = & "$Runtime\bin\java.exe" '-Dfile.encoding=UTF-8' -cp "$AppDir;$Dist\lib\*;$Root\out\test" DbVerify 2>&1
+  if ($LASTEXITCODE -ne 0) { $smoke | Out-Host; throw '内置运行时冒烟验证（DbVerify）失败' }
+  Write-Host '  内置运行时冒烟验证通过（DbVerify）' -ForegroundColor Green
+} else {
+  Write-Host '  跳过内置运行时冒烟验证（无测试产物，使用 -SkipTests 构建）' -ForegroundColor Yellow
+}
+
+Write-Host '[5/5] Native DLL 检查…' -ForegroundColor Cyan
 $dll = Join-Path $Classes 'localagent_native.dll'
 if (Test-Path $dll) {
   Copy-Item $dll (Join-Path $AppDir 'localagent_native.dll')

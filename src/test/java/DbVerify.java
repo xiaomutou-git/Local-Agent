@@ -3,7 +3,10 @@ import com.localagent.db.Audit;
 import com.localagent.db.Db;
 import com.localagent.memory.MemoryStore;
 
+import java.io.IOException;
 import java.nio.file.*;
+import java.util.Comparator;
+import java.util.stream.Stream;
 
 /**
  * 数据层烟测：sqlite-jdbc 原生驱动加载 + Config 白名单 + Memory 过滤。
@@ -12,8 +15,44 @@ public class DbVerify {
     static int pass = 0, fail = 0;
     static void t(String n, boolean c) { if (c) { pass++; System.out.println("[PASS] " + n); } else { fail++; System.out.println("[FAIL] " + n); } }
 
+    /**
+     * 递归删除临时目录（best-effort，静默）：按路径倒序先删文件再删空目录，
+     * 遇 Windows 文件锁（如 SQLite wal）做短暂重试。
+     * 不输出 stderr：build.ps1 以 EAP=Stop 运行测试，原生进程 stderr 会被
+     * 包装成终止错误导致整轮构建中断。
+     * @param root 待删除目录；为 null 或不存在时直接返回
+     */
+    static void deleteRecursively(Path root) {
+        if (root == null || !Files.exists(root)) return;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            boolean remaining = false;
+            try (Stream<Path> walk = Files.walk(root)) {
+                for (Path p : walk.sorted(Comparator.reverseOrder()).toList()) {
+                    try { Files.deleteIfExists(p); } catch (IOException e) { remaining = true; }
+                }
+            } catch (IOException e) {
+                return;
+            }
+            if (!remaining || !Files.exists(root)) return;
+            try { Thread.sleep(120); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
+        }
+    }
+
+    /**
+     * 注册 JVM 退出清理钩子：先关闭 SQLite 连接释放 wal 锁，再递归删目录。
+     * 本回归以 System.exit 结束（try/finally 不会执行），必须用 shutdown hook。
+     * @param dir 退出时递归删除的临时目录
+     */
+    static void cleanupOnExit(Path dir) {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            Db.close();
+            deleteRecursively(dir);
+        }, "test-cleanup"));
+    }
+
     public static void main(String[] args) throws Exception {
         Path dir = Files.createTempDirectory("localagent-dbtest");
+        cleanupOnExit(dir);
         Db.init(dir);
         Audit.init();
         Config.init();
