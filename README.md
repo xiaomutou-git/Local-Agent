@@ -1,6 +1,6 @@
 # 本机助手 · JVM 版（Java + Swing + C/JNI）
 
-Electron/Node 版（`../time`）的 Java 重写版。本地 Ollama 模型驱动的桌面助手，Swing 原生界面，
+本地 Ollama 模型驱动的桌面助手，Swing 原生界面，
 核心业务全部在内存安全的 Java 中；C 仅保留一个极小的 JNI DLL 承载 Java 无法完成的 Win32 能力。
 
 ## 技术栈与零网络构建
@@ -29,18 +29,19 @@ time-jvm/
 │   ├── config/Config.java     # 配置（白名单 key、keepAlive 保活等）
 │   ├── db/                    # SQLite + 审计日志（90 天保留/4000 字截断/旧库自动迁移）
 │   ├── safety/
-│   │   ├── Safety.java        # 命令白名单+二级解析/路径保护/敏感读取（完整对齐 JS 版）
+│   │   ├── Safety.java        # 命令白名单+二级解析/路径保护/敏感读取
 │   │   ├── CheckResult.java
 │   │   └── DocSafety.java     # 文档危险内容检测
 │   ├── ollama/OllamaClient.java # 回环校验/禁重定向/unsafe 端口/SSE 流式/异步 generate
 │   ├── agent/                 # Agent 循环、审批（5min 超时）、会话持久化、空闲记忆调度
-│   ├── tools/Tools.java       # 30+ 工具（文件/命令/进程/截图/Office/记忆/提醒…）
+│   ├── tools/Tools.java       # 36 个内置工具（文件/命令/进程/截图/Office/记忆/提醒…）
+│   ├── mcp/                   # MCP 外部工具（仅本地 stdio）：客户端/管理器/工具目录/环境探测与模板
 │   ├── memory/ knowledge/ scheduler/ tts/ office/
 │   ├── nativelib/NativeBridge.java  # JNI 桥（无 DLL 时优雅降级）
 │   ├── util/Json.java         # Jackson 封装（JSON 容错读写）
 │   └── ui/                    # Swing 主窗、设置、审计对话框、系统托盘提醒
 ├── native-c/localagent_native.c # Win32：前台窗口标题、清空回收站（约 60 行）
-├── src/test/java/             # 回归三件套 + UiVerify/UiShot（手工 UI 截图校验，不入回归）
+├── src/test/java/             # 回归六件套 + UiVerify/UiShot（手工 UI 截图校验，不入回归）
 ├── build.ps1                  # 一键构建+回归+打包（零网络）
 ├── build-native.ps1/.cmd      # 可选：MSVC 编译 JNI DLL（需 Windows SDK）
 └── dist/本机助手/              # 构建产物（双击 本机助手.bat 启动）
@@ -49,7 +50,7 @@ time-jvm/
 ## 构建与运行
 
 ```powershell
-# 一键构建（编译 + 38 项回归 + 组装 dist）
+# 一键构建（编译 + 147 项回归 + 组装 dist）
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 
 # 仅编译打包（跳过回归）
@@ -58,19 +59,21 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -SkipTests
 # 运行：双击 dist\本机助手\本机助手.bat（先启动本机 Ollama）
 ```
 
-回归基线：**安全 POC 24/24、Office 往返 7/7、数据层 7/7（共 38 项）**；
+回归基线：**安全 POC 24/24、Office 往返 7/7、数据层 7/7、MCP 工具合并 35/35、
+MCP stdio 49/49、本地环境探测 25/25（共 147 项）**；
 生产代码另以 `-Xlint:all` 编译保持 **0 error / 0 warning**。
 
-## 安全对齐（与 Electron 版一致）
+## 安全设计
 
-- 命令执行：`shell:false` 参数数组 + 黑名单（certutil/bitsadmin/mshta/wsl…）+ cmd/powershell 二级解析
+- 命令执行：参数数组直传（不经 shell 拼接）+ 黑名单（certutil/bitsadmin/mshta/wsl…）
+  + cmd/powershell 二级解析
   + 完整命令行审批展示 + 5 分钟审批超时
 - 路径：HARD_DENY/PROTECTED 目录 + junction realpath 识别；敏感目录/凭据文件读取升级确认
 - 网络：Ollama 仅允许字面回环、拒绝 URL 凭据、unsafe 端口黑名单、HttpClient Redirect.NEVER
 - 配置：白名单 key，拒绝 mass-assignment
 - 依赖：全部为 JDK 内置或从本机复制的固定版本 jar
 
-## 与 Electron 版的差异（当前版本）
+## 当前版本说明
 
 1. **原生 DLL 未编译**：本机 VS2022 未安装 Windows SDK（缺 UCRT 头文件/库）。
    影响仅两个功能：`get_foreground_window`（前台窗口标题）返回空、`empty_recycle_bin` 不可用；
@@ -82,15 +85,27 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -SkipTests
    空状态欢迎页、细滚动条；消息以纯文本气泡展示（无 Markdown 富文本）。
    设计规范集中在 `ui/UiTheme.java`（色板/字体/间距/圆角），可在此统一换肤。
 
+## MCP 外部工具（仅本地 stdio，离线红线）
+
+- 设置面板可视化每个服务的连接状态、工具数与错误详情，可一键「测试连接」
+  （用临时进程握手，不写配置、不影响正式连接）。
+- 保存配置后后台热重连，新增/修改/停用服务均免重启生效。
+- 自动探测本机 npx/uvx/python 运行环境，并一键插入 filesystem/memory/time 三个纯本地服务模板；
+  Windows 下 npx 自动包装 `cmd.exe /c`，服务名冲突自动加后缀。
+- 配置与运行时均拒绝 http/url 等网络型远程服务，MCP 子进程统一注入死代理环境。
+
 ## 数据位置与旧库迁移
 
-数据库与配置：`%USERPROFILE%\AppData\Roaming\本机助手\data\agent.db`（与 Electron 版独立，互不影响）。
+数据库与配置：`%USERPROFILE%\AppData\Roaming\本机助手\data\agent.db`。
 
-首次启动自动识别 Electron 旧版库结构：`conversations` 缺 `data` 列时以 `ALTER TABLE` 平滑补列，
+首次启动自动识别旧版库结构：`conversations` 缺 `data` 列时以 `ALTER TABLE` 平滑补列，
 再把旧 `messages` 表中的历史消息无损回填进会话 JSON，旧会话打开即可见，无需手工处理。
 
 ## 近期更新
 
+- **MCP 本地工具链**：设置面板新增连接状态面板与「测试连接」（临时握手、不污染正式连接）；
+  保存配置后后台热重连，免重启增删/启停服务；自动探测 npx/uvx/python 并一键插入
+  filesystem/memory/time 本地服务模板；三环境并行探测约 8 秒封顶。全程仅允许本地 stdio，拒绝 http/url。
 - **旧版数据库自动迁移**：旧表自动补列并回填历史消息，覆盖安装不丢会话；发送/流式异常改为红色上屏，
   不再静默无响应。
 - **记忆提取不再卡住界面**：回合结束不立即调用模型，改为空闲 90 秒后异步提取（新消息会重置计时）；
