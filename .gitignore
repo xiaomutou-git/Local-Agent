@@ -1,0 +1,35 @@
+# ===== 构建产物（可由 build.ps1 重新生成，不入库）=====
+out/
+dist/
+build/
+target/
+
+# ===== 类文件兜底 =====
+*.class
+
+# ===== 运行期数据与日志（如曾在项目目录运行过）=====
+*.db
+*.sqlite
+*.sqlite3
+conversations.data
+*.log
+logs/
+
+# ===== 原生构建中间产物 =====
+*.obj
+*.o
+*.lib
+*.exp
+*.pdb
+*.dll
+# 注：localagent_native.dll 为可选生成物，由 build-native.ps1 产出，不入库
+
+# ===== 操作系统/编辑器杂项 =====
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+*.iml
+.vscode/
+.factorypath
