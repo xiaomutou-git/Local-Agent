@@ -1,5 +1,8 @@
 package com.localagent.tools;
 
+import com.localagent.toolkit.Proc;
+import com.localagent.toolkit.ToolDef;
+import com.localagent.toolkit.ToolResult;
 import com.localagent.config.Config;
 import com.localagent.knowledge.Knowledge;
 import com.localagent.memory.MemoryStore;
@@ -93,6 +96,9 @@ public class Tools {
             td("create_docx", "创建 .docx Word 文档。", "confirm"),
             td("create_xlsx", "创建 .xlsx 表格。", "confirm"),
             td("read_office", "提取 .pptx/.docx/.xlsx 文本（50MB 以内，含危险内容拦截）。", "auto"),
+            td("edit_docx", "编辑已有 .docx：文末追加段落，或在同一文本节点内做 find/replace 替换；自动备份 .bak。", "confirm"),
+            td("edit_xlsx", "编辑已有 .xlsx：按工作表追加多行或按 A1 引用写入单元格；自动备份 .bak。", "confirm"),
+            td("edit_ppt", "编辑已有 .pptx：在演示文稿末尾追加幻灯片（title+bullets）；自动备份 .bak。", "confirm"),
             td("search_knowledge", "在本地知识库中检索资料片段（BM25）。", "auto"),
             td("schedule_reminder", "设定提醒（at=ISO 时间 或 delayMinutes=分钟，repeat=once/hourly/daily/weekly）。", "auto"),
             td("cancel_reminder", "取消提醒。", "confirm"),
@@ -135,6 +141,9 @@ public class Tools {
                 case "create_docx" -> office.createDocx(args);
                 case "create_xlsx" -> office.createXlsx(args);
                 case "read_office" -> office.readOffice(args);
+                case "edit_docx" -> office.editDocx(args);
+                case "edit_xlsx" -> office.editXlsx(args);
+                case "edit_ppt" -> office.editPpt(args);
                 case "search_knowledge" -> searchKnowledge(args);
                 case "schedule_reminder" -> scheduler.schedule(args);
                 case "cancel_reminder" -> scheduler.remove(str(args.get("id")));

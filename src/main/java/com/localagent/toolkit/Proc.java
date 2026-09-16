@@ -1,4 +1,4 @@
-package com.localagent.tools;
+package com.localagent.toolkit;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;

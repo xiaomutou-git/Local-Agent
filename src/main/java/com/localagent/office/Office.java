@@ -1,7 +1,7 @@
 package com.localagent.office;
 
 import com.localagent.safety.DocSafety;
-import com.localagent.tools.ToolResult;
+import com.localagent.toolkit.ToolResult;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
@@ -341,6 +341,388 @@ public class Office {
             }
             return out.toString();
         }
+    }
+
+    // ================= 编辑已有文档（读包 -> 改 XML -> 备份原子回写）=================
+
+    /**
+     * 编辑已有 Word 文档：在文末追加段落，并/或做文本替换。
+     * 执行逻辑：校验路径与操作项 -> 读 word/document.xml -> 替换限定在单个
+     * &lt;w:t&gt; 文本节点内（对本工具生成的段落精确生效）-> 段落插到 sectPr 之前 ->
+     * 备份原文件为 .bak 后原子覆盖。
+     * @param a 参数：path 必填；paragraphs 同 create_docx 的段落数组；
+     *          find/replace 成对出现时做文本替换；backup 默认 true（保留一份 .bak）
+     * @return 成功时汇总追加段数与替换次数；结构不符/危险内容/公式类风险时返回错误
+     */
+    public ToolResult editDocx(Map<String, Object> a) {
+        String path = norm(asString(a.get("path")));
+        if (path.isEmpty() || !path.toLowerCase(Locale.ROOT).endsWith(".docx"))
+            return ToolResult.error("路径必须指向已有的 .docx 文件。");
+        List<Map<String, Object>> append = paras(a);
+        String find = asString(a.get("find"));
+        String replace = asString(a.get("replace"));
+        boolean doReplace = a.containsKey("find") && a.containsKey("replace") && !find.isEmpty();
+        if (append.isEmpty() && !doReplace)
+            return ToolResult.error("请提供要追加的 paragraphs，或成对的 find/replace。");
+        StringBuilder danger = new StringBuilder();
+        for (var p : append) danger.append(asString(p.get("text"))).append('\n');
+        if (doReplace) danger.append(replace).append('\n');
+        var issues = DocSafety.detect(danger.toString());
+        if (!issues.isEmpty())
+            return ToolResult.error("写入内容包含危险内容（" + String.join("、", issues) + "），禁止写入。");
+        try {
+            Map<String, byte[]> zip = readAllEntries(path);
+            byte[] docBytes = zip.get("word/document.xml");
+            if (docBytes == null) return ToolResult.error("不是有效的 docx：缺少 word/document.xml。");
+            String xml = new String(docBytes, StandardCharsets.UTF_8);
+            int replaced = 0;
+            if (doReplace) {
+                // 仅在独立文本节点 <w:t...>...</w:t> 内替换，避免改动任何标签/属性；
+                // find 做字面匹配（Pattern.quote），不接受正则
+                String literal = Pattern.quote(escape(find));
+                Matcher tm = Pattern.compile("<w:t(\\s[^>]*)?>([\\s\\S]*?)</w:t>").matcher(xml);
+                StringBuilder nx = new StringBuilder();
+                while (tm.find()) {
+                    String attrs = tm.group(1) == null ? "" : tm.group(1);
+                    String inner = tm.group(2);
+                    String[] cnt = inner.split(literal, -1);
+                    if (cnt.length > 1) {
+                        replaced += cnt.length - 1;
+                        inner = String.join(escape(replace), cnt);
+                    }
+                    tm.appendReplacement(nx, Matcher.quoteReplacement("<w:t" + attrs + ">" + inner + "</w:t>"));
+                }
+                tm.appendTail(nx);
+                xml = nx.toString();
+                if (replaced == 0)
+                    return ToolResult.error("未在文档中找到要替换的文本：" + truncate(find, 40) + "（跨格式/跨文本节点的文字无法匹配）。");
+            }
+            if (!append.isEmpty()) {
+                StringBuilder add = new StringBuilder();
+                for (var p : append) {
+                    String type = asString(p.getOrDefault("type", "para"));
+                    int size = "title".equals(type) ? 32 : "heading1".equals(type) ? 28 : 22;
+                    add.append(paraXml(escape(asString(p.get("text"))),
+                            "title".equals(type) || "heading1".equals(type), size));
+                }
+                // sectPr 必须是 body 的最后一个元素，新段落只能插在它前面；
+                // 没有 sectPr 时退化为插在 </w:body> 前
+                int sect = xml.lastIndexOf("<w:sectPr");
+                if (sect >= 0) xml = xml.substring(0, sect) + add + xml.substring(sect);
+                else {
+                    int end = xml.lastIndexOf("</w:body>");
+                    if (end < 0) return ToolResult.error("document.xml 结构异常，找不到 w:body。");
+                    xml = xml.substring(0, end) + add + xml.substring(end);
+                }
+            }
+            zip.put("word/document.xml", xml.getBytes(StandardCharsets.UTF_8));
+            boolean backup = !"false".equals(asString(a.getOrDefault("backup", "true")));
+            rewriteZip(path, zip, backup);
+            return ToolResult.ok("已更新 Word 文档：" + path
+                    + "（追加 " + append.size() + " 段" + (doReplace ? "，替换 " + replaced + " 处" : "")
+                    + (backup ? "，原文件备份为同目录 .bak" : "") + "）。");
+        } catch (Exception e) {
+            return ToolResult.error("编辑 docx 失败：" + e.getMessage());
+        }
+    }
+
+    /**
+     * 编辑已有 Excel：向工作表追加多行，并/或按 A1 引用写入指定单元格。
+     * 执行逻辑：经 workbook.xml + 关系文件定位目标 worksheet -> 解析现有
+     * 行/单元格（保留原始单元格 XML）-> 合并新增内容并按列排序 -> 替换 sheetData、
+     * 更新 dimension -> 备份后原子回写。
+     * @param a 参数：path 必填；sheet 为工作表名（不传用第一个）；appendRows 为二维
+     *          文本数组；cells 为 {ref:"B3", value:"x"} 列表；backup 默认 true
+     * @return 成功汇总追加行数与写入单元格数；纯数字自动按数值类型，=/+/-/@ 开头拒绝
+     */
+    public ToolResult editXlsx(Map<String, Object> a) {
+        String path = norm(asString(a.get("path")));
+        if (path.isEmpty() || !path.toLowerCase(Locale.ROOT).endsWith(".xlsx"))
+            return ToolResult.error("路径必须指向已有的 .xlsx 文件。");
+        List<List<String>> appendRows = stringRows(a.get("appendRows"));
+        List<Map<String, Object>> cells = cellWrites(a.get("cells"));
+        if (appendRows.isEmpty() && cells.isEmpty())
+            return ToolResult.error("请提供 appendRows（追加行）或 cells（按引用写入单元格）。");
+        for (List<String> row : appendRows)
+            for (String v : row) if (badCell(v)) return ToolResult.error("单元格内容存在安全风险：" + truncate(v, 30));
+        for (Map<String, Object> c : cells)
+            if (badCell(asString(c.get("value"))))
+                return ToolResult.error("单元格内容存在安全风险：" + truncate(asString(c.get("value")), 30));
+        try {
+            Map<String, byte[]> zip = readAllEntries(path);
+            String sheetEntry = resolveWorksheetEntry(zip, asString(a.get("sheet")));
+            if (sheetEntry == null) return ToolResult.error("未找到工作表"
+                    + (asString(a.get("sheet")).isEmpty() ? "（工作簿似乎没有工作表）。"
+                    : "：" + asString(a.get("sheet")) + "（请用 read_office 查看现有工作表名）。"));
+            String xml = new String(zip.get(sheetEntry), StandardCharsets.UTF_8);
+
+            // 行号 -> {列名 -> 原始/新单元格 XML}，保留未修改单元格的原始 XML
+            TreeMap<Integer, LinkedHashMap<String, String>> rows = new TreeMap<>();
+            Matcher rm = Pattern.compile("<row\\b[^>]*\\br=\"(\\d+)\"[^>]*(?:/>|>([\\s\\S]*?)</row>)").matcher(xml);
+            while (rm.find()) {
+                int rn = Integer.parseInt(rm.group(1));
+                LinkedHashMap<String, String> cs = new LinkedHashMap<>();
+                String body = rm.group(2);
+                if (body != null) {
+                    Matcher cm = Pattern.compile("<c\\b[^>]*\\br=\"([A-Z]+)\\d+\"[^>]*(?:/>|>[\\s\\S]*?</c>)").matcher(body);
+                    while (cm.find()) cs.put(cm.group(1), cm.group(0));
+                }
+                rows.put(rn, cs);
+            }
+            int writes = 0;
+            for (Map<String, Object> c : cells) {
+                int[] rc = parseRef(asString(c.get("ref")));
+                if (rc == null) return ToolResult.error("单元格引用无效（应为如 B3 的形式）：" + asString(c.get("ref")));
+                rows.computeIfAbsent(rc[0], k -> new LinkedHashMap<>())
+                        .put(colName(rc[1] - 1), cellXml(asString(c.get("ref")), asString(c.get("value"))));
+                writes++;
+            }
+            int maxExisting = rows.isEmpty() ? 0 : rows.lastKey();
+            int appended = 0;
+            int next = maxExisting + 1;
+            for (List<String> row : appendRows) {
+                LinkedHashMap<String, String> cs = rows.computeIfAbsent(next, k -> new LinkedHashMap<>());
+                int col = 0;
+                for (String v : row) cs.put(colName(col++), cellXml(colName(col - 1) + next, v));
+                next++; appended++;
+            }
+            int maxRow = rows.isEmpty() ? 1 : Math.max(1, rows.lastKey());
+            int maxCol = 1;
+            for (var cs : rows.values())
+                for (String col : cs.keySet()) maxCol = Math.max(maxCol, colIndex(col) + 1);
+            StringBuilder sd = new StringBuilder("<sheetData>");
+            for (var e : rows.entrySet()) {
+                sd.append("<row r=\"").append(e.getKey()).append("\">");
+                // 单元格按列顺序输出，符合 OOXML 对行内单元格升序的要求
+                new ArrayList<>(e.getValue().entrySet()).stream()
+                        .sorted(Comparator.comparingInt(en -> colIndex(en.getKey())))
+                        .forEach(en -> sd.append(en.getValue()));
+                sd.append("</row>");
+            }
+            sd.append("</sheetData>");
+            // 用重建后的 sheetData 替换原块（兼容自闭合的空 sheetData）
+            Matcher sdMatcher = Pattern.compile("<sheetData\\b[^>]*(?:/>|>[\\s\\S]*?</sheetData>)").matcher(xml);
+            if (!sdMatcher.find()) return ToolResult.error("worksheet XML 缺少 sheetData，文件可能损坏。");
+            xml = sdMatcher.replaceFirst(Matcher.quoteReplacement(sd.toString()));
+            // dimension 必须位于 sheetData 之前：先删除旧 dimension，再在 sheetData 前插入
+            xml = xml.replaceFirst("<dimension\\b[^>]*/>", "");
+            String dim = "<dimension ref=\"A1:" + colName(maxCol - 1) + maxRow + "\"/>";
+            xml = xml.replaceFirst("<sheetData", Matcher.quoteReplacement(dim) + "<sheetData");
+            zip.put(sheetEntry, xml.getBytes(StandardCharsets.UTF_8));
+            boolean backup = !"false".equals(asString(a.getOrDefault("backup", "true")));
+            rewriteZip(path, zip, backup);
+            return ToolResult.ok("已更新 Excel：" + path + "（追加 " + appended + " 行，写入 " + writes
+                    + " 个指定单元格" + (backup ? "，原文件备份为 .bak" : "") + "）。");
+        } catch (Exception e) {
+            return ToolResult.error("编辑 xlsx 失败：" + e.getMessage());
+        }
+    }
+
+    /**
+     * 编辑已有 PPT：在演示文稿末尾追加幻灯片。
+     * 执行逻辑：读取内容清单/演示文稿/关系三件套 -> 计算现有最大 slide 序号、
+     * r:id 与 sldId -> 追加 slideN.xml 并同步三处引用 -> 备份后原子回写。
+     * @param a 参数：path 必填；slides 与 create_ppt 相同（title+bullets）；backup 默认 true
+     * @return 成功汇总追加页数；缺少关键结构或含危险内容时返回错误
+     */
+    public ToolResult editPpt(Map<String, Object> a) {
+        String path = norm(asString(a.get("path")));
+        if (path.isEmpty() || !path.toLowerCase(Locale.ROOT).endsWith(".pptx"))
+            return ToolResult.error("路径必须指向已有的 .pptx 文件。");
+        List<Map<String, Object>> slides = slides(a);
+        if (slides.isEmpty()) return ToolResult.error("请通过 slides 提供要追加的幻灯片（title+bullets）。");
+        StringBuilder danger = new StringBuilder();
+        for (var s : slides) {
+            danger.append(asString(s.get("title"))).append('\n');
+            for (Object b : (List<?>) s.getOrDefault("bullets", List.of())) danger.append(asString(b)).append('\n');
+        }
+        var issues = DocSafety.detect(danger.toString());
+        if (!issues.isEmpty())
+            return ToolResult.error("幻灯片包含危险内容（" + String.join("、", issues) + "），禁止写入。");
+        try {
+            if (slides.size() > 200) slides = slides.subList(0, 200);
+            Map<String, byte[]> zip = readAllEntries(path);
+            String ctPath = "[Content_Types].xml";
+            String presPath = "ppt/presentation.xml";
+            String relsPath = "ppt/_rels/presentation.xml.rels";
+            if (zip.get(presPath) == null || zip.get(relsPath) == null || zip.get(ctPath) == null)
+                return ToolResult.error("不是有效的 pptx：缺少 presentation.xml / 关系文件 / 内容清单。");
+            String ct = new String(zip.get(ctPath), StandardCharsets.UTF_8);
+            String pres = new String(zip.get(presPath), StandardCharsets.UTF_8);
+            String rels = new String(zip.get(relsPath), StandardCharsets.UTF_8);
+            if (!pres.contains("<p:sldIdLst"))
+                return ToolResult.error("presentation.xml 缺少幻灯片列表，无法追加。");
+            int maxSlide = 0, maxRid = 1, maxSldId = 255;
+            for (String n : zip.keySet()) {
+                Matcher m = Pattern.compile("ppt/slides/slide(\\d+)\\.xml$").matcher(n);
+                if (m.find()) maxSlide = Math.max(maxSlide, Integer.parseInt(m.group(1)));
+            }
+            Matcher ridm = Pattern.compile("\\bId=\"rId(\\d+)\"").matcher(rels);
+            while (ridm.find()) maxRid = Math.max(maxRid, Integer.parseInt(ridm.group(1)));
+            Matcher idm = Pattern.compile("<p:sldId\\b[^>]*\\bid=\"(\\d+)\"").matcher(pres);
+            while (idm.find()) maxSldId = Math.max(maxSldId, Integer.parseInt(idm.group(1)));
+
+            StringBuilder ctAdd = new StringBuilder(), presAdd = new StringBuilder(), relsAdd = new StringBuilder();
+            for (int k = 0; k < slides.size(); k++) {
+                int slideNo = maxSlide + 1 + k;
+                int rid = maxRid + 1 + k;
+                int sldId = maxSldId + 1 + k;
+                String entry = "ppt/slides/slide" + slideNo + ".xml";
+                if (zip.containsKey(entry)) continue;
+                zip.put(entry, slideXml(slides.get(k)).getBytes(StandardCharsets.UTF_8));
+                ctAdd.append("<Override PartName=\"/ppt/slides/slide").append(slideNo)
+                        .append(".xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>");
+                presAdd.append("<p:sldId id=\"").append(sldId).append("\" r:id=\"rId").append(rid).append("\"/>");
+                relsAdd.append("<Relationship Id=\"rId").append(rid)
+                        .append("\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\"")
+                        .append(" Target=\"slides/slide").append(slideNo).append(".xml\"/>");
+            }
+            ct = ct.replace("</Types>", ctAdd + "</Types>");
+            pres = pres.replace("</p:sldIdLst>", presAdd + "</p:sldIdLst>");
+            rels = rels.replace("</Relationships>", relsAdd + "</Relationships>");
+            zip.put(ctPath, ct.getBytes(StandardCharsets.UTF_8));
+            zip.put(presPath, pres.getBytes(StandardCharsets.UTF_8));
+            zip.put(relsPath, rels.getBytes(StandardCharsets.UTF_8));
+            boolean backup = !"false".equals(asString(a.getOrDefault("backup", "true")));
+            rewriteZip(path, zip, backup);
+            return ToolResult.ok("已在 PPT 末尾追加 " + slides.size() + " 页：" + path
+                    + (backup ? "（原文件备份为 .bak）" : "") + "。");
+        } catch (Exception e) {
+            return ToolResult.error("编辑 pptx 失败：" + e.getMessage());
+        }
+    }
+
+    // ---- 编辑辅助 ----
+    /**
+     * 读取 zip 全部条目到有序映射（键=条目名，值=原始字节），保留包内顺序。
+     * @param path OOXML 文件路径
+     * @return 保持遍历顺序的条目映射
+     * @throws IOException 文件不存在或超过 50MB / 单条目超过 20MB 时抛出
+     */
+    private static Map<String, byte[]> readAllEntries(String path) throws IOException {
+        File f = new File(path);
+        if (!f.exists()) throw new IOException("文件不存在：" + path);
+        if (f.length() > MAX_FILE) throw new IOException("文件超过 50MB 编辑上限。");
+        Map<String, byte[]> map = new LinkedHashMap<>();
+        try (ZipFile zf = new ZipFile(path)) {
+            for (ZipEntry e : Collections.list(zf.entries())) {
+                if (e.isDirectory()) continue;
+                try (InputStream in = zf.getInputStream(e); ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+                    in.transferTo(bos);
+                    byte[] b = bos.toByteArray();
+                    if (b.length > MAX_ENTRY) throw new IOException("条目过大：" + e.getName());
+                    map.put(e.getName(), b);
+                }
+            }
+        }
+        return map;
+    }
+
+    /**
+     * 备份后把全部条目原子重写到目标 OOXML 文件。
+     * 执行逻辑：先复制原文件为 .bak（覆盖旧备份）-> 写临时文件 -> 移动覆盖原文件，
+     * 任何中途失败都不会破坏原文件。
+     * @param path   目标文件
+     * @param files  完整条目集合（未修改条目也必须包含，原样回写）
+     * @param backup true=在同目录保留一份 .bak 备份
+     * @throws IOException 临时文件写入或移动失败时抛出
+     */
+    private static void rewriteZip(String path, Map<String, byte[]> files, boolean backup) throws IOException {
+        Path target = Paths.get(path);
+        if (backup) Files.copy(target, Paths.get(path + ".bak"),
+                StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+        Path tmp = Paths.get(path + ".tmp");
+        try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(tmp.toFile()), StandardCharsets.UTF_8)) {
+            for (var e : files.entrySet()) {
+                zos.putNextEntry(new ZipEntry(e.getKey()));
+                zos.write(e.getValue());
+                zos.closeEntry();
+            }
+        }
+        try {
+            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException am) {
+            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /** 单元格内容安全判定：危险指令或公式注入（=/+/-/@ 开头）。 */
+    private static boolean badCell(String v) {
+        return !DocSafety.detect(v).isEmpty() || v.matches("^[=+\\-@].+");
+    }
+
+    /** 生成一个单元格 XML：纯整数/小数按数值类型，其余按 inlineStr 文本。 */
+    private static String cellXml(String ref, String value) {
+        if (value.matches("-?\\d+(\\.\\d+)?"))
+            return "<c r=\"" + ref + "\"><v>" + value + "</v></c>";
+        return "<c r=\"" + ref + "\" t=\"inlineStr\"><is><t xml:space=\"preserve\">"
+                + escape(value) + "</t></is></c>";
+    }
+
+    /**
+     * 解析 A1 引用为 {行号(1基), 列号(1基)}；非法返回 null。
+     * @param ref 如 "B3"
+     * @return int[]{3, 2} 或 null
+     */
+    private static int[] parseRef(String ref) {
+        Matcher m = Pattern.compile("^([A-Z]{1,3})(\\d{1,7})$").matcher(ref == null ? "" : ref.trim().toUpperCase(Locale.ROOT));
+        if (!m.find()) return null;
+        return new int[]{Integer.parseInt(m.group(2)), colIndex(m.group(1)) + 1};
+    }
+
+    /** 列字母（A、B…AA）转 0 基列序号。 */
+    private static int colIndex(String letters) {
+        int n = 0;
+        for (int i = 0; i < letters.length(); i++) n = n * 26 + (letters.charAt(i) - 'A' + 1);
+        return n - 1;
+    }
+
+    /**
+     * 经 workbook.xml 与其关系文件定位目标工作表的 zip 条目名。
+     * @param zip  全部条目
+     * @param name 工作表名；空白时取第一个工作表
+     * @return 如 xl/worksheets/sheet1.xml；找不到返回 null
+     */
+    private static String resolveWorksheetEntry(Map<String, byte[]> zip, String name) {
+        byte[] wbBytes = zip.get("xl/workbook.xml");
+        byte[] relBytes = zip.get("xl/_rels/workbook.xml.rels");
+        if (wbBytes == null || relBytes == null) return null;
+        String wb = new String(wbBytes, StandardCharsets.UTF_8);
+        String rels = new String(relBytes, StandardCharsets.UTF_8);
+        Matcher sm = Pattern.compile("<sheet\\b[^>]*\\bname=\"([^\"]*)\"[^>]*\\br:id=\"([^\"]+)\"")
+                .matcher(wb);
+        String wantRid = null;
+        String firstRid = null;
+        while (sm.find()) {
+            if (firstRid == null) firstRid = sm.group(2);
+            if (!name.isEmpty() && sm.group(1).equals(name)) wantRid = sm.group(2);
+        }
+        String rid = wantRid != null ? wantRid : (name.isEmpty() ? firstRid : null);
+        if (rid == null) return null;
+        Matcher rm = Pattern.compile("<Relationship\\b[^>]*\\bId=\"" + Pattern.quote(rid)
+                + "\"[^>]*\\bTarget=\"([^\"]+)\"").matcher(rels);
+        if (!rm.find()) return null;
+        String target = rm.group(1).replace('\\', '/');
+        String entry = target.startsWith("/") ? target.substring(1)
+                : target.startsWith("xl/") ? target : "xl/" + target;
+        return zip.containsKey(entry) ? entry : null;
+    }
+
+    private static List<List<String>> stringRows(Object o) {
+        List<List<String>> out = new ArrayList<>();
+        if (o instanceof List<?> rows)
+            for (Object r : rows)
+                if (r instanceof List<?> cells) {
+                    List<String> line = new ArrayList<>();
+                    for (Object c : cells) line.add(asString(c));
+                    out.add(line);
+                }
+        return out;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> cellWrites(Object o) {
+        return o instanceof List ? (List<Map<String, Object>>) o : List.of();
     }
 
     // ---- zip 工具 ----

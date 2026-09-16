@@ -1,8 +1,8 @@
 import com.localagent.mcp.McpToolCatalog;
 import com.localagent.mcp.McpToolCatalog.Discovered;
 import com.localagent.mcp.McpToolCatalog.Route;
-import com.localagent.tools.ToolDef;
-import com.localagent.tools.ToolResult;
+import com.localagent.toolkit.ToolDef;
+import com.localagent.toolkit.ToolResult;
 
 import java.util.LinkedHashMap;
 import java.util.List;

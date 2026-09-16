@@ -2,7 +2,7 @@ package com.localagent.mcp;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.localagent.config.Config;
-import com.localagent.tools.ToolResult;
+import com.localagent.toolkit.ToolResult;
 import com.localagent.util.Json;
 
 import java.util.ArrayList;

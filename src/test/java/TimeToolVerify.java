@@ -1,5 +1,5 @@
-import com.localagent.tools.ToolDef;
-import com.localagent.tools.ToolResult;
+import com.localagent.toolkit.ToolDef;
+import com.localagent.toolkit.ToolResult;
 import com.localagent.tools.ToolSchemas;
 import com.localagent.tools.Tools;
 
@@ -36,7 +36,7 @@ public class TimeToolVerify {
 
         ToolDef def = tools.get("get_current_time");
         t("get_current_time 已注册", def != null);
-        t("工具总数为 37", tools.list().size() == 37);
+        t("工具总数为 40", tools.list().size() == 40);
         t("无参工具 Schema 非空对象", def != null && "object".equals(def.parameters().get("type")));
         t("空参数通过 Schema 校验", def != null && ToolSchemas.validate(def, Map.of()).isEmpty());
 

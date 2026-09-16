@@ -1,4 +1,3 @@
-import com.localagent.safety.CheckResult;
 import com.localagent.safety.Safety;
 
 import java.util.*;

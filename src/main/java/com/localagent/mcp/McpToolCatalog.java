@@ -1,7 +1,7 @@
 package com.localagent.mcp;
 
-import com.localagent.tools.ToolDef;
-import com.localagent.tools.ToolResult;
+import com.localagent.toolkit.ToolDef;
+import com.localagent.toolkit.ToolResult;
 
 import java.util.ArrayList;
 import java.util.Collections;

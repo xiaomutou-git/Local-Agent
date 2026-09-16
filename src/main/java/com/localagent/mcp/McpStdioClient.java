@@ -2,8 +2,8 @@ package com.localagent.mcp;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.localagent.tools.ToolResult;
-import com.localagent.tools.Proc;
+import com.localagent.toolkit.ToolResult;
+import com.localagent.toolkit.Proc;
 import com.localagent.util.Json;
 
 import java.io.BufferedReader;

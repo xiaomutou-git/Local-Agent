@@ -45,6 +45,8 @@ public final class MainFrame extends JFrame {
     private final JTextArea input = new JTextArea(3, 40);
     private final FlatButton sendBtn = FlatButton.primary("发送");
     private final FlatButton stopBtn = FlatButton.danger("停止");
+    /** 发送区「优化提示词」按钮：点击后用当前模型改写输入框文本并回填，不直接发送。 */
+    private final FlatButton polishBtn = FlatButton.ghost("✨ 优化提示词");
     private final JPanel approvalPanel = new JPanel();
     private final transient Object approvalLock = new Object();
 
@@ -234,7 +236,7 @@ public final class MainFrame extends JFrame {
         JPanel btns = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         btns.setOpaque(false);
         stopBtn.setVisible(false);
-        btns.add(stopBtn); btns.add(sendBtn);
+        btns.add(polishBtn); btns.add(stopBtn); btns.add(sendBtn);
         inputBottom.add(btns, BorderLayout.EAST);
         inputCard.add(inputBottom, BorderLayout.SOUTH);
         dock.add(inputCard, BorderLayout.SOUTH);
@@ -244,6 +246,7 @@ public final class MainFrame extends JFrame {
     // ================= 事件 =================
     private void bindEvents() {
         sendBtn.addActionListener(e -> doSend());
+        polishBtn.addActionListener(e -> doPolish());
         stopBtn.addActionListener(e -> agent.stop());
         findByName(this, "new-conversation", JButton.class).addActionListener(e -> {
             activeConvId = agent.newConversation();
@@ -439,6 +442,37 @@ public final class MainFrame extends JFrame {
         }
     }
 
+    /**
+     * 「优化提示词」动作：把输入框当前文本发给本地模型改写，结果回填输入框供用户
+     * 确认后再自行发送（不自动发送、不写入会话历史）。
+     * 执行逻辑：EDT 读取并校验文本 -> 禁用按钮防重复点击 -> 异步改写 ->
+     * 回到 EDT 回填文本并恢复按钮；失败只上屏错误，不清空用户原文。
+     */
+    private void doPolish() {
+        final String text = input.getText().trim();
+        if (text.isEmpty() || agent.isBusy() || !polishBtn.isEnabled()) return;
+        polishBtn.setEnabled(false);
+        polishBtn.setText("优化中…");
+        // 异步请求在 HttpClient 线程完成；所有 Swing 操作统一切回 EDT
+        agent.polishPromptAsync(text).whenComplete((polished, ex) ->
+                SwingUtilities.invokeLater(() -> {
+                    polishBtn.setEnabled(!agent.isBusy());
+                    polishBtn.setText("✨ 优化提示词");
+                    if (ex != null) {
+                        Throwable cause = (ex instanceof java.util.concurrent.CompletionException
+                                && ex.getCause() != null) ? ex.getCause() : ex;
+                        String msg = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
+                        chatPane.addError("提示词优化失败：" + msg);
+                        return;
+                    }
+                    if (polished != null && !polished.isBlank()) {
+                        input.setText(polished);
+                        input.setCaretPosition(polished.length());
+                        input.requestFocusInWindow();
+                    }
+                }));
+    }
+
     private void newConversation() {
         activeConvId = agent.newConversation();
         chatPane.reset();
@@ -632,7 +666,11 @@ public final class MainFrame extends JFrame {
     public UiCallback callback() {
         return new UiCallback() {
             @Override public void onBusy(boolean busy) {
-                SwingUtilities.invokeLater(() -> { sendBtn.setVisible(!busy); stopBtn.setVisible(busy); });
+                SwingUtilities.invokeLater(() -> {
+                    sendBtn.setVisible(!busy); stopBtn.setVisible(busy);
+                    // 对话进行中禁用提示词优化，避免改写请求与正式回合争抢本地模型
+                    polishBtn.setEnabled(!busy);
+                });
             }
             @Override public void onAssistantDelta(String chunk) {
                 SwingUtilities.invokeLater(() -> chatPane.appendAssistantDelta(chunk));

@@ -11,7 +11,6 @@ import com.localagent.tts.Tts;
 import com.localagent.mcp.McpManager;
 import com.localagent.ui.MainFrame;
 
-import java.awt.*;
 import java.nio.file.*;
 
 /**

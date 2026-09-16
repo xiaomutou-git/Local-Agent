@@ -6,8 +6,8 @@ import com.localagent.mcp.McpManager.ServerState;
 import com.localagent.mcp.McpManager.ServerStatus;
 import com.localagent.mcp.McpToolCatalog;
 import com.localagent.mcp.McpToolCatalog.Route;
-import com.localagent.tools.ToolDef;
-import com.localagent.tools.ToolResult;
+import com.localagent.toolkit.ToolDef;
+import com.localagent.toolkit.ToolResult;
 import com.localagent.tools.Tools;
 import com.localagent.util.Json;
 
@@ -29,7 +29,7 @@ import java.util.stream.Stream;
  *    enabled=false 静默跳过；command 不存在的服务启动失败但不影响其他服务；
  * 2. 真实子进程链路：以当前 JBR 启动 {@link FakeMcpServer}，完成 initialize ->
  *    tools/list -> tools/call（成功文本、isError 业务失败、JSON-RPC error）；
- * 3. 目录接线：发现登记数量、risk 固定 confirm、Schema 透传、与本地 37 工具合并；
+ * 3. 目录接线：发现登记数量、risk 固定 confirm、Schema 透传、与本地 40 工具合并；
  * 4. 生命周期：shutdown 后子进程客户端移除，调用降级为"未连接"结构化错误。
  */
 public class McpStdioVerify {
@@ -166,7 +166,7 @@ public class McpStdioVerify {
         t("boom 工具已登记", catalog.get(boomQn) != null);
 
         List<ToolDef> merged = catalog.merge(new Tools(null, null, null, null, null).list());
-        t("本地 37 + 外部 2 = 39 合并", merged.size() == 39);
+        t("本地 40 + 外部 2 = 42 合并", merged.size() == 42);
         t("合并列表含 echo 限定名", merged.stream().anyMatch(d -> echoQn.equals(d.name())));
 
         // ---- 4) 真实 tools/call：成功 / isError / JSON-RPC error ----

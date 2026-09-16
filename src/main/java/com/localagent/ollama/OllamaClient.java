@@ -235,4 +235,42 @@ public final class OllamaClient {
             }
         });
     }
+
+    /**
+     * 单次非流式改写请求（提示词优化等轻量文本润色任务）。
+     * 设计思路：与 {@link #generateAsync} 同走 sendAsync（cancel(true) 可由 JDK 中止
+     * 底层 exchange，避免关闭窗口后请求继续占用模型），但系统提示词、输入文本与
+     * 输出长度上限均参数化，不绑定"记忆提取"这一具体用途；强制 think=false，
+     * 防止推理模型把改写结果写进 thinking 字段而 content 为空。
+     * @param model        模型名（须为本地已存在模型）
+     * @param systemPrompt 系统提示词（规定改写规则与输出约束）
+     * @param userPrompt   待改写的原始文本
+     * @param maxTokens    输出 token 上限（小于 64 时按 64 兜底）
+     * @return 以助手消息正文完成的 Future；网络失败/非 2xx/被取消时以异常完成
+     */
+    public java.util.concurrent.CompletableFuture<String> rewriteAsync(
+            String model, String systemPrompt, String userPrompt, int maxTokens) {
+        ObjectNode body = Json.mapper().createObjectNode();
+        body.put("model", model).put("stream", false).put("think", false);
+        body.put("keep_alive", Config.getInt("keepAlive", 1800000));
+        ObjectNode opts = body.putObject("options");
+        opts.put("num_predict", Math.max(64, maxTokens));
+        opts.put("num_ctx", Config.getInt("numCtx", 8192));
+        ArrayNode msgs = body.putArray("messages");
+        msgs.addObject().put("role", "system").put("content", systemPrompt);
+        msgs.addObject().put("role", "user").put("content", userPrompt);
+        HttpRequest req = HttpRequest.newBuilder(URI.create(origin() + "/api/chat"))
+                .header("Content-Type", "application/json")
+                .timeout(Duration.ofSeconds(60))
+                .POST(HttpRequest.BodyPublishers.ofString(Json.stringify(body))).build();
+        return http.sendAsync(req, HttpResponse.BodyHandlers.ofString()).thenApply(resp -> {
+            if (resp.statusCode() / 100 != 2)
+                throw new RuntimeException("改写请求失败 (" + resp.statusCode() + ")");
+            try {
+                return Json.mapper().readTree(resp.body()).path("message").path("content").asText("");
+            } catch (Exception e) {
+                throw new RuntimeException("改写响应解析失败: " + e.getMessage(), e);
+            }
+        });
+    }
 }

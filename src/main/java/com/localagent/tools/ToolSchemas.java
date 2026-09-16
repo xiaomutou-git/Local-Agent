@@ -1,5 +1,7 @@
 package com.localagent.tools;
 
+import com.localagent.toolkit.ToolDef;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -440,6 +442,23 @@ public final class ToolSchemas {
                 .opt("sheets", arr("工作表列表；不传时生成一个示例工作表", sheetSchema()))
                 .build());
         r.put("read_office", new B().req("path", str("要读取的 .docx/.xlsx/.pptx 文件绝对路径（50MB 以内）")).build());
+        r.put("edit_docx", new B()
+                .req("path", str("要修改的已有 .docx 文件绝对路径（原文件自动备份为同目录 .bak）"))
+                .opt("paragraphs", arr("追加到文末的段落列表（插在分节符之前）", paragraphSchema()))
+                .opt("find", str("要查找的原文（字面匹配，仅限同一文本节点内，不支持正则；与 replace 成对使用）"))
+                .opt("replace", str("替换后的文本（与 find 成对使用；替换为危险内容会被拦截）"))
+                .build());
+        r.put("edit_xlsx", new B()
+                .req("path", str("要修改的已有 .xlsx 文件绝对路径（原文件自动备份为同目录 .bak）"))
+                .opt("sheet", str("目标工作表名称；不传时修改第一个工作表"))
+                .opt("appendRows", arr("追加到工作表末尾的二维数据（每个元素是一行，行内每个元素是一个单元格，不要以 =/+/-/@ 开头）",
+                        arr("一行的单元格数组", str("单元格文本"))))
+                .opt("cells", arr("按 A1 引用写入/覆盖的单元格列表", cellWriteSchema()))
+                .build());
+        r.put("edit_ppt", new B()
+                .req("path", str("要修改的已有 .pptx 文件绝对路径（原文件自动备份为同目录 .bak）"))
+                .req("slides", arr("追加到演示文稿末尾的幻灯片列表（1~200 页）", slideSchema(), 1, 200))
+                .build());
 
         // ---- 知识库 / 记忆 ----
         r.put("search_knowledge", new B()
@@ -493,6 +512,14 @@ public final class ToolSchemas {
         prop(s, "name", false, str("工作表名称（标签页名）"));
         prop(s, "rows", true, arr("二维表格数据，每个元素是一行；行内每个元素是一个单元格文本（不要以 =/+/-/@ 开头）",
                 arr("一行的单元格数组", str("单元格文本"))));
+        return s;
+    }
+
+    /** edit_xlsx 的 cells 数组元素：{ref, value}，按 A1 引用定点写入。 */
+    private static Map<String, Object> cellWriteSchema() {
+        Map<String, Object> s = objectFragment("单元格定点写入");
+        prop(s, "ref", true, str("单元格引用（列字母+行号），如 B3、AA12"));
+        prop(s, "value", true, str("要写入的文本或数字；不要以 =/+/-/@ 开头（防公式注入）"));
         return s;
     }
 }

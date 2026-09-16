@@ -1,7 +1,7 @@
 package com.localagent.scheduler;
 
 import com.localagent.db.Db;
-import com.localagent.tools.ToolResult;
+import com.localagent.toolkit.ToolResult;
 
 import java.sql.*;
 import java.time.*;
