@@ -88,13 +88,13 @@ if (-not $SkipTests) {
   $tcode = $LASTEXITCODE
   $ErrorActionPreference = $nativeErr2
   if ($tcode -ne 0) { $tout | Out-Host; throw '测试代码编译失败' }
-  foreach ($t in 'SecurityVerify','OfficeVerify','DbVerify','McpMergeVerify','McpStdioVerify','LocalToolchainVerify','ProcVerify','TimeToolVerify','SessionExportVerify','KnowledgeIndexVerify','SingleInstanceVerify') {
+  foreach ($t in 'SecurityVerify','OfficeVerify','DbVerify','McpMergeVerify','McpStdioVerify','LocalToolchainVerify','ProcVerify','TimeToolVerify','SessionExportVerify','KnowledgeIndexVerify','SingleInstanceVerify','OllamaBootstrapVerify') {
     $rout = & $JavaRun '-Dfile.encoding=UTF-8' -cp "$Classes;$Test;$Root\lib\*" $t 2>&1
     $rcode = $LASTEXITCODE
     $rout | Select-Object -Last 2 | Out-Host
     if ($rcode -ne 0) { $rout | Out-Host; throw "$t 回归失败" }
   }
-  Write-Host '  全部回归通过（安全 39 / Office 30 / 数据层 7 / MCP 合并 35 / MCP stdio 49 / 本地环境 25 / 进程管道 6 / 时间工具 10 / 会话导出 8 / 知识索引 9 / 单实例 3，共 221）' -ForegroundColor Green
+  Write-Host '  全部回归通过（安全 39 / Office 30 / 数据层 7 / MCP 合并 35 / MCP stdio 49 / 本地环境 25 / 进程管道 6 / 时间工具 10 / 会话导出 8 / 知识索引 9 / 单实例 3 / Ollama 引导 38，共 259）' -ForegroundColor Green
 } else {
   Write-Host '[2/5] 跳过测试' -ForegroundColor Yellow
 }
@@ -121,6 +121,47 @@ start "" "%JAVA_EXE%" -Dfile.encoding=UTF-8 "-Djava.library.path=%~dp0app" -cp "
 endlocal
 '@
 Set-Content -Path (Join-Path $Dist '本机助手.bat') -Value $bat -Encoding Default
+
+# exe 启动器 + 卸载程序：用系统自带 .NET Framework 4 的 csc 编译 native-cs 下两个 C# 源
+# （均为 winexe 子系统，全程无黑窗；零网络零第三方依赖）。
+# - 本机助手.exe：定位内置 runtime 的 javaw 拉起主程序，含早失败提示；
+# - 卸载.exe：交互式卸载，个人数据默认保留，程序目录经随机名 PS 脚本在退出后自删。
+# csc 不存在时降级为仅保留 .bat，不中断构建。
+$LauncherSrc = Join-Path $Root 'native-cs\Launcher.cs'
+$UninstallerSrc = Join-Path $Root 'native-cs\Uninstaller.cs'
+$CscCandidates = @(
+  Join-Path $env:windir 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+  Join-Path $env:windir 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
+)
+$Csc = $CscCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($Csc -and (Test-Path $LauncherSrc)) {
+    $prevEapCsc = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+
+    # 启动器（仅依赖 WinForms）
+    $LauncherExe = Join-Path $Dist '本机助手.exe'
+    $cout1 = & $Csc /nologo /target:winexe /codepage:65001 /r:System.Windows.Forms.dll `
+        "/out:$LauncherExe" "$LauncherSrc" 2>&1
+    $ccode1 = $LASTEXITCODE
+    if ($ccode1 -ne 0) { $ErrorActionPreference = $prevEapCsc; $cout1 | Out-Host; throw 'exe 启动器编译失败' }
+    Write-Host '  exe 启动器就绪（本机助手.exe，无黑窗）' -ForegroundColor Green
+
+    # 卸载程序（WinForms + Drawing + mscorlib 内注册表 API）
+    if (Test-Path $UninstallerSrc) {
+        $UninstallerExe = Join-Path $Dist '卸载.exe'
+        $cout2 = & $Csc /nologo /target:winexe /codepage:65001 `
+            /r:System.Windows.Forms.dll /r:System.Drawing.dll `
+            "/out:$UninstallerExe" "$UninstallerSrc" 2>&1
+        $ccode2 = $LASTEXITCODE
+        if ($ccode2 -ne 0) { $ErrorActionPreference = $prevEapCsc; $cout2 | Out-Host; throw '卸载程序编译失败' }
+        Write-Host '  卸载程序就绪（卸载.exe）' -ForegroundColor Green
+    } else {
+        Write-Host '  未找到 native-cs\Uninstaller.cs：跳过卸载程序' -ForegroundColor Yellow
+    }
+    $ErrorActionPreference = $prevEapCsc
+} else {
+    Write-Host '  未找到 .NET Framework csc.exe 或启动器源码：跳过 exe，仅保留 .bat 启动器' -ForegroundColor Yellow
+}
 Write-Host '  分发目录就绪' -ForegroundColor Green
 
 Write-Host '[4/5] 生成内置运行时（免安装 JDK）…' -ForegroundColor Cyan
@@ -176,4 +217,9 @@ if (Test-Path $dll) {
 
 Write-Host ''
 Write-Host "构建完成：$Dist" -ForegroundColor Green
-Write-Host '双击「本机助手.bat」即可启动（需本机已运行 Ollama）。'
+if (Test-Path (Join-Path $Dist '本机助手.exe')) {
+  Write-Host '双击「本机助手.exe」即可启动（无黑窗；.bat 为带控制台输出的备用启动器，需本机已运行 Ollama）。'
+  if (Test-Path (Join-Path $Dist '卸载.exe')) { Write-Host '卸载请双击同目录「卸载.exe」（个人数据默认保留，卸载时可勾选删除）。' }
+} else {
+  Write-Host '双击「本机助手.bat」即可启动（需本机已运行 Ollama）。'
+}

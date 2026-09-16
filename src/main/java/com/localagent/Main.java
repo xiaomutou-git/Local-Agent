@@ -62,6 +62,17 @@ public class Main {
         Config.init();
         if (migrated) new SessionStore().backfillLegacyIfNeeded();
         upgradeConfig();
+        // 首次启动引导：未完成过 Ollama 安装/模型配置时，模态引导用户一键安装
+        // （仅 Windows；任何异常都不得阻断主界面启动，状态栏会照常提示离线）
+        if (System.getProperty("os.name", "").toLowerCase().contains("win")
+                && !Config.getBool("ollamaBootstrapDone", false)) {
+            try {
+                SwingUtilities.invokeAndWait(() ->
+                        com.localagent.ui.OllamaSetupDialog.showIfNeeded(null));
+            } catch (Exception e) {
+                System.err.println("[bootstrap] Ollama 引导未运行：" + e.getMessage());
+            }
+        }
         Audit.init();
 
         Knowledge knowledge = new Knowledge();

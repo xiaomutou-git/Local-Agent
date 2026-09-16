@@ -57,6 +57,9 @@ public final class Config {
         DEFAULTS.put("cmdTimeout", 120000);
         DEFAULTS.put("maxSteps", 20);
         DEFAULTS.put("readLimit", 32000);
+        // 首次启动 Ollama 引导（安装检测/下载安装器/按内存选模型）完成或被用户主动跳过后
+        // 置 true，之后不再自动弹窗；用户仍可在设置中自行管理模型
+        DEFAULTS.put("ollamaBootstrapDone", false);
         // 配置结构版本：用于对历史用户做一次性默认值升级（升级后尊重用户后续手动修改）
         DEFAULTS.put("configVersion", 2);
         DEFAULTS.putNull("darkMode");
