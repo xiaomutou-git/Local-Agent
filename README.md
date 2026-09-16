@@ -15,6 +15,7 @@
 | Office | 手写 OOXML（java.util.zip + XML，无 POI） | JDK |
 | 截屏 | AWT Robot | JDK |
 | 原生 DLL | C + MSVC（VS2022，可选） | `native-c/` |
+| exe 启动器/卸载器 | C#（系统自带 .NET Framework 4 的 csc 编译，零下载） | `native-cs/` |
 
 **构建全程不需要网络/Maven**（当前环境 Maven 源不可达）。构建脚本直接调用本机 JBR javac。
 
@@ -32,39 +33,73 @@ time-jvm/
 │   │   ├── Safety.java        # 命令白名单+二级解析/路径保护/敏感读取
 │   │   ├── CheckResult.java
 │   │   └── DocSafety.java     # 文档危险内容检测
-│   ├── ollama/OllamaClient.java # 回环校验/禁重定向/unsafe 端口/SSE 流式/异步 generate
+│   ├── ollama/                # OllamaClient（回环/流式）+ OllamaEnv/OllamaSetup（首次引导）
+│   │                          #   OllamaEnv：安装/服务/模型检测、按内存选档、签名校验、pull 进度
 │   ├── agent/                 # Agent 循环、审批（5min 超时）、会话持久化、空闲记忆调度
 │   ├── tools/Tools.java       # 36 个内置工具（文件/命令/进程/截图/Office/记忆/提醒…）
 │   ├── mcp/                   # MCP 外部工具（仅本地 stdio）：客户端/管理器/工具目录/环境探测与模板
 │   ├── memory/ knowledge/ scheduler/ tts/ office/
 │   ├── nativelib/NativeBridge.java  # JNI 桥（无 DLL 时优雅降级）
 │   ├── util/Json.java         # Jackson 封装（JSON 容错读写）
-│   └── ui/                    # Swing 主窗、设置、审计对话框、系统托盘提醒
-├── native-c/localagent_native.c # Win32：前台窗口标题、清空回收站（约 60 行）
-├── src/test/java/             # 回归 11 件套 + UiVerify/UiShot（手工 UI 截图校验，不入回归）
-├── build.ps1                  # 一键构建+回归+自带运行时+打包（零网络）
+│   └── ui/                    # 主窗、设置、审计对话框、托盘提醒、OllamaSetupDialog（首次引导）
+├── native-c/localagent_native.c # Win32：前台窗口标题、清空回收站（约 60 行，可选）
+├── native-cs/                 # C# 源（系统 csc 编译，零依赖）：Launcher.cs 启动器、Uninstaller.cs 卸载器
+├── src/test/java/             # 回归 12 件套 + UiVerify/UiShot（手工 UI 截图校验，不入回归）
+├── build.ps1                  # 一键构建+回归+自带运行时+编译 exe 启动器/卸载器+打包（零网络）
 ├── build-native.ps1/.cmd      # 可选：MSVC 编译 JNI DLL（需 Windows SDK）
-└── dist/本机助手/              # 构建产物（含内置 runtime，双击 本机助手.bat 启动）
+└── dist/本机助手/              # 构建产物（内置 runtime；双击 本机助手.exe 启动，卸载.exe 卸载）
 ```
 
 ## 构建与运行
 
 ```powershell
-# 一键构建（编译 + 183 项回归 + 内置运行时 + 组装 dist）
+# 一键构建（编译 + 259 项回归 + 内置运行时 + 编译 exe 启动器/卸载器 + 组装 dist）
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 
 # 仅编译打包（跳过回归）
 powershell -ExecutionPolicy Bypass -File .\build.ps1 -SkipTests
 
-# 运行：双击 dist\本机助手\本机助手.bat（先启动本机 Ollama）
+# 运行：双击 dist\本机助手\本机助手.exe（无黑窗；.bat 为带控制台输出的备用启动器）
+# 首次启动若未装 Ollama 会自动引导安装与下载模型，无需手工准备（见下节）
 ```
 
-回归基线：**安全 POC 24/24、Office 往返 7/7、数据层 7/7、MCP 工具合并 35/35、
+回归基线：**安全 POC 39/39、Office 往返 30/30、数据层 7/7、MCP 工具合并 35/35、
 MCP stdio 49/49、本地环境探测 25/25、进程管道 6/6、时间工具 10/10、
-会话导出 8/8、知识库索引 9/9、单实例锁 3/3（共 183 项）**；
+会话导出 8/8、知识库索引 9/9、单实例锁 3/3、Ollama 引导 38/38（共 259 项）**；
 构建产物 `dist\本机助手\runtime` 内置完整运行时（JDK 带 jmods 时优先 jlink
-裁剪，否则复制 JBR），目标机器无需安装 JDK；
+裁剪，否则复制 JBR），目标机器无需安装 JDK；`本机助手.exe`/`卸载.exe` 由系统自带
+.NET Framework 4 的 csc 编译，目标机器 Win7 及以上免装运行库；
 生产代码另以 `-Xlint:all` 编译保持 **0 error / 0 warning**。
+
+## 首次启动引导（自动安装 Ollama 与适配模型）
+
+首次双击 `本机助手.exe` 时，主界面前先做三态检测（仅首次出现，跳过后不再打扰）：
+
+1. **未安装 Ollama**：一键从固定官方地址 `https://ollama.com/download/OllamaSetup.exe`
+   下载安装器（带进度），先做 Windows **Authenticode 数字签名校验**（必须 Valid 且证书
+   主体含 Ollama，防止下载链路被劫持运行伪造文件），通过后才启动官方安装器并等待服务就绪；
+2. **已安装但服务未运行**：自动拉起 `ollama app.exe` 并轮询 `/api/version` 确认就绪；
+3. **服务正常但无模型**：按本机物理内存预选合适档位，确认后 `ollama pull` 拉取（实时进度、可取消）。
+
+模型按内存五档推荐（qwen2.5 中文模型，体积取自 Ollama 官方库标注），用户可改选：
+
+| 内存 | 推荐模型 | 下载量 |
+| --- | --- | --- |
+| ≥32GB | qwen2.5:14b | 约 9.0GB |
+| ≥16GB | qwen2.5:7b | 约 4.7GB |
+| ≥8GB | qwen2.5:3b（可选视觉版 qwen2.5vl:3b 分析图片） | 约 1.9GB |
+| ≥4GB | qwen2.5:1.5b | 约 986MB |
+| 更低 | qwen2.5:0.5b | 约 398MB |
+
+拉取成功后自动写入配置并进入主界面；也提供「手动下载/说明」与「跳过」出口，
+任何步骤失败都可重试。跳过状态记录在配置项 `ollamaBootstrapDone`，日后可在设置中自行管理。
+
+## 卸载
+
+双击分发目录中的 `卸载.exe`：二次确认后自动终止运行中的进程、删除程序目录与开机自启
+注册表项（`HKCU\...\Run\LocalAgent`）及 `%TEMP%\local-agent`；**个人数据
+（`%APPDATA%\本机助手` 的聊天记录/配置/知识索引）默认保留，必须显式勾选才删除**；
+截图目录与知识库原文目录永不自动删除。程序目录由退出后的随机名 PowerShell 脚本自清理。
 
 ## 安全设计
 
@@ -75,6 +110,16 @@ MCP stdio 49/49、本地环境探测 25/25、进程管道 6/6、时间工具 10/
 - 网络：Ollama 仅允许字面回环、拒绝 URL 凭据、unsafe 端口黑名单、HttpClient Redirect.NEVER
 - 配置：白名单 key，拒绝 mass-assignment
 - 依赖：全部为 JDK 内置或从本机复制的固定版本 jar
+- 白盒渗透复测加固（8 项，均有回归覆盖）：
+  - **Office zip 炸弹**：解压改流式有界读取，单条目 20MB / 单包 1 万条目 / 累计 100MB
+    三重闸门在读流阶段即时生效，OOM 不再先于检查；createPpt 补齐危险内容检测
+  - **命令参数借道**：白名单 `explorer`/`control` 新增参数审查，拦截 exe 借道执行、
+    URL/UNC 外联、任意 CPL 加载（直接调用与 `cmd /c` 子段双重生效）
+  - **cmd 解析绕过**：折叠 `^` 转义（`d^e^l`）、拒绝 `%VAR%`/`!VAR!` 展开、
+    拦截引号外重定向符，封堵首词匹配绕过
+  - 图片分析 20MB 体积预检（Base64 膨胀前拦截）；系统保护目录按 SystemDrive 动态解析
+  - 工具参数预览/会话标题统一 HTML 转义，修复 JLabel 注入；TTS 临时脚本改
+    SecureRandom 随机名并用后即删；引导安装器必须通过 Authenticode 签名校验
 
 ## 当前版本说明
 
@@ -106,6 +151,16 @@ MCP stdio 49/49、本地环境探测 25/25、进程管道 6/6、时间工具 10/
 
 ## 近期更新
 
+- **免安装交付（exe 启动器 + 卸载器）**：用系统自带 .NET Framework 4 的 csc 编译两个
+  GUI 程序（零第三方依赖）——`本机助手.exe` 无黑窗启动（按内置 runtime/JAVA_HOME/PATH
+  定位 javaw，启动失败有明确弹窗）、`卸载.exe` 交互式卸载（个人数据默认保留）；
+  build.ps1 每次出包自动编译，缺 csc 时降级保留 .bat。
+- **首次启动自动配置 Ollama**：三态检测（未安装/服务未运行/无模型）一键闭环；安装器
+  下载后强制 Authenticode 签名校验；按物理内存五档推荐 qwen2.5（8GB+ 可选 qwen2.5vl
+  视觉版），`ollama pull` 实时进度、可取消；置顶引导窗口避免被其他程序遮挡。
+- **白盒渗透修复 8 项漏洞**：Office zip 炸弹流式三重闸门、explorer/control 参数借道、
+  cmd `^`/`%VAR%`/重定向绕过、图片体积预检、保护目录动态系统盘、JLabel HTML 注入、
+  TTS 可预测临时脚本、createPpt 危险内容检测；回归由 183 扩充至 259 项全绿。
 - **MCP 本地工具链**：设置面板新增连接状态面板与「测试连接」（临时握手、不污染正式连接）；
   保存配置后后台热重连，免重启增删/启停服务；自动探测 npx/uvx/python 并一键插入
   filesystem/memory/time 本地服务模板；三环境并行探测约 8 秒封顶。全程仅允许本地 stdio，拒绝 http/url。
