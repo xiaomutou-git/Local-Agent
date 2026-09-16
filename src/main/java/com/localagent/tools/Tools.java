@@ -337,10 +337,29 @@ public class Tools {
         return ToolResult.ok("已截图：" + outPath, Map.of("path", outPath, "size", img.getWidth() + "x" + img.getHeight()));
     }
 
+    /**
+     * 图像分析单文件体积上限：20MB。
+     * 依据：读入后需做 Base64 编码（体积膨胀约 1.33 倍）并随请求驻留内存，
+     * 较 readFile 的 50MB 文本上限更严格，避免超大图造成堆压力与请求体超限。
+     */
+    private static final long MAX_IMAGE_BYTES = 20L * 1024 * 1024;
+
+    /**
+     * 读取本地图片转 Base64 后交视觉模型问答。
+     * 执行逻辑：路径规范化 -> 存在性与 20MB 体积预检（拒绝后不读入内存）->
+     * Base64 编码 -> 调用 Ollama 视觉接口。
+     * @param a 工具参数：path（图片绝对路径，必填）、question（提问文本）
+     * @return 模型回答；路径无效/文件缺失/超限时返回 error
+     * @throws Exception 读取文件或模型请求 IO 失败时向上抛出（由调用方统一兜底）
+     */
     private ToolResult analyzeImage(Map<String, Object> a) throws Exception {
         String p = Safety.normalizePath(str(a.get("path")));
         if (p == null) return ToolResult.error("路径无效。");
-        byte[] buf = Files.readAllBytes(Paths.get(p));
+        File f = new File(p);
+        if (!f.exists()) return ToolResult.error("无法读取图片（不存在）：" + p);
+        if (f.length() > MAX_IMAGE_BYTES)
+            return ToolResult.error("图片过大（" + fmtBytes(f.length()) + "），仅支持 20MB 以内图像。");
+        byte[] buf = Files.readAllBytes(f.toPath());
         String b64 = Base64.getEncoder().encodeToString(buf);
         String text = ollama.askImage(Config.getString("model", ""), str(a.get("question")), b64);
         return text.isBlank() ? ToolResult.error("模型没有返回内容。") : ToolResult.ok(text);

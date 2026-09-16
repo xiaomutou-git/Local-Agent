@@ -20,11 +20,18 @@ import java.util.zip.*;
  * 安全：
  * - 路径写入由 Tools 前置的 Safety.checkWrite 统一校验；
  * - 读取结果统一经 DocSafety 危险内容拦截；
- * - 50MB 文件 / 单条目 20MB 上限，防 zip 炸弹与 OOM。
+ * - 50MB 压缩包 / 单条目解压 20MB / 单包 1 万条目 / 累计解压 100MB 四重上限，
+ *   且上限在流式读取阶段即时生效（不再先全量入内存），从根本上防 zip 炸弹 OOM。
  */
 public class Office {
+    /** 压缩包本体大小上限（50MB，压缩后字节）。 */
     private static final long MAX_FILE = 50L * 1024 * 1024;
+    /** 单个 zip 条目解压后字节上限：读取场景按此截断，编辑场景超限即拒绝。 */
     private static final int MAX_ENTRY = 20 * 1024 * 1024;
+    /** 单个 OOXML 包允许的最大条目数（防海量中央目录项耗尽内存/CPU）。 */
+    private static final int MAX_ENTRIES = 10_000;
+    /** 整包解压后累计字节总闸：50MB 压缩包最多解压 100MB，超限按压缩炸弹处理。 */
+    private static final long MAX_TOTAL = 100L * 1024 * 1024;
 
     private static String norm(String p) {
         if (p == null || p.isBlank()) return "";
@@ -177,6 +184,15 @@ public class Office {
         if (out.isEmpty() || !out.toLowerCase(Locale.ROOT).endsWith(".pptx")) return ToolResult.error("路径必须以 .pptx 结尾。");
         List<Map<String, Object>> slides = slides(a);
         if (slides.isEmpty()) slides.add(Map.of("title", "演示文稿", "bullets", List.of("（请补充内容）")));
+        // 危险内容检查（与 createDocx/createXlsx/editPpt 对齐，防止提示注入借 PPT 落地危险文本）
+        StringBuilder danger = new StringBuilder();
+        for (var s : slides) {
+            danger.append(asString(s.get("title"))).append('\n');
+            for (Object b : (List<?>) s.getOrDefault("bullets", List.of())) danger.append(asString(b)).append('\n');
+        }
+        var issues = DocSafety.detect(danger.toString());
+        if (!issues.isEmpty())
+            return ToolResult.error("幻灯片包含危险内容（" + String.join("、", issues) + "），禁止生成。");
         try {
             if (slides.size() > 200) slides = slides.subList(0, 200);
             StringBuilder ct = new StringBuilder("""
@@ -292,13 +308,16 @@ public class Office {
     private String readPptx(String p) throws IOException {
         StringBuilder sb = new StringBuilder();
         try (ZipFile zf = new ZipFile(p)) {
-            var names = Collections.list(zf.entries()).stream()
+            var names = entriesBounded(zf).stream()
                     .map(ZipEntry::getName).filter(n -> n.matches("ppt/slides/slide\\d+\\.xml"))
                     .sorted(Comparator.comparingInt(Office::slideNum)).toList();
             int i = 1;
+            long total = 0;
             for (String n : names) {
                 byte[] b = readEntry(zf, n);
-                if (b.length > MAX_ENTRY) b = Arrays.copyOf(b, MAX_ENTRY);
+                total += b.length;
+                if (total > MAX_TOTAL)
+                    throw new IOException("解压后总大小超过 100MB 上限，疑似压缩炸弹。");
                 sb.append("第").append(i++).append("页：").append(stripXml(new String(b, StandardCharsets.UTF_8))).append('\n');
             }
         }
@@ -308,19 +327,24 @@ public class Office {
     private String readXlsx(String p) throws IOException {
         List<String> shared = new ArrayList<>();
         try (ZipFile zf = new ZipFile(p)) {
+            long total = 0;
             ZipEntry se = zf.getEntry("xl/sharedStrings.xml");
             if (se != null) {
                 byte[] b = readEntry(zf, "xl/sharedStrings.xml");
-                if (b.length > MAX_ENTRY) b = Arrays.copyOf(b, MAX_ENTRY);
+                total += b.length;
+                if (total > MAX_TOTAL)
+                    throw new IOException("解压后总大小超过 100MB 上限，疑似压缩炸弹。");
                 Matcher m = Pattern.compile("<si>([\\s\\S]*?)</si>").matcher(new String(b, StandardCharsets.UTF_8));
                 while (m.find()) shared.add(stripXml(m.group(1)));
             }
-            var names = Collections.list(zf.entries()).stream().map(ZipEntry::getName)
+            var names = entriesBounded(zf).stream().map(ZipEntry::getName)
                     .filter(n -> n.matches("xl/worksheets/sheet\\d+\\.xml")).sorted().toList();
             StringBuilder out = new StringBuilder();
             for (String n : names) {
                 byte[] b = readEntry(zf, n);
-                if (b.length > MAX_ENTRY) b = Arrays.copyOf(b, MAX_ENTRY);
+                total += b.length;
+                if (total > MAX_TOTAL)
+                    throw new IOException("解压后总大小超过 100MB 上限，疑似压缩炸弹。");
                 String xml = new String(b, StandardCharsets.UTF_8);
                 Matcher rows = Pattern.compile("<row[^>]*>([\\s\\S]*?)</row>").matcher(xml);
                 while (rows.find()) {
@@ -595,9 +619,11 @@ public class Office {
     // ---- 编辑辅助 ----
     /**
      * 读取 zip 全部条目到有序映射（键=条目名，值=原始字节），保留包内顺序。
+     * 执行逻辑：有界枚举条目数 -> 逐条目流式严格读取（解压超过 20MB 即拒，
+     * 不先全量入内存）-> 累计解压量超过 100MB 即拒，三重闸门防 zip 炸弹 OOM。
      * @param path OOXML 文件路径
      * @return 保持遍历顺序的条目映射
-     * @throws IOException 文件不存在或超过 50MB / 单条目超过 20MB 时抛出
+     * @throws IOException 文件不存在/超过 50MB/条目数超 1 万/单条目超 20MB/累计超 100MB 时抛出
      */
     private static Map<String, byte[]> readAllEntries(String path) throws IOException {
         File f = new File(path);
@@ -605,14 +631,14 @@ public class Office {
         if (f.length() > MAX_FILE) throw new IOException("文件超过 50MB 编辑上限。");
         Map<String, byte[]> map = new LinkedHashMap<>();
         try (ZipFile zf = new ZipFile(path)) {
-            for (ZipEntry e : Collections.list(zf.entries())) {
+            long total = 0;
+            for (ZipEntry e : entriesBounded(zf)) {
                 if (e.isDirectory()) continue;
-                try (InputStream in = zf.getInputStream(e); ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
-                    in.transferTo(bos);
-                    byte[] b = bos.toByteArray();
-                    if (b.length > MAX_ENTRY) throw new IOException("条目过大：" + e.getName());
-                    map.put(e.getName(), b);
-                }
+                byte[] b = readEntryStrict(zf, e);
+                total += b.length;
+                if (total > MAX_TOTAL)
+                    throw new IOException("解压后总大小超过 100MB 上限，疑似压缩炸弹。");
+                map.put(e.getName(), b);
             }
         }
         return map;
@@ -639,11 +665,45 @@ public class Office {
                 zos.closeEntry();
             }
         }
-        try {
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (AtomicMoveNotSupportedException am) {
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+        moveReplaceWithRetry(tmp, target);
+    }
+
+    /**
+     * 移动临时文件覆盖目标（Windows 友好）。
+     * 执行逻辑：优先 ATOMIC_MOVE+REPLACE_EXISTING，文件系统不支持原子移动时
+     * 退化为普通移动；Windows 上 Defender 实时扫描/搜索索引器常对刚生成的
+     * .tmp 或目标文档产生几十至几百毫秒的句柄占用，导致 AccessDeniedException，
+     * 因此对 IO 失败做最多 3 次、每次 150ms 的退避重试
+     * （与回归测试 deleteRecursively 的既有重试策略一致）。
+     * @param tmp    已写好的临时文件
+     * @param target 被覆盖的目标文件
+     * @throws IOException 3 次重试后仍失败时抛出最后一次 IO 异常；线程被中断时抛 IOException 包装
+     */
+    private static void moveReplaceWithRetry(Path tmp, Path target) throws IOException {
+        IOException last = null;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                return;
+            } catch (AtomicMoveNotSupportedException am) {
+                try {
+                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                    return;
+                } catch (IOException e) {
+                    last = e;
+                }
+            } catch (IOException e) {
+                // 覆盖 Windows 文件锁导致的 AccessDeniedException 等瞬时失败，退避后重试
+                last = e;
+            }
+            try {
+                Thread.sleep(150);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new IOException("覆盖目标文件时线程被中断：" + target, ie);
+            }
         }
+        throw last;
     }
 
     /** 单元格内容安全判定：危险指令或公式注入（=/+/-/@ 开头）。 */
@@ -741,13 +801,76 @@ public class Office {
         try (ZipFile zf = new ZipFile(zipPath)) { return readEntry(zf, entry); }
     }
 
+    /**
+     * 读取类场景的有界条目读取：最多返回 {@link #MAX_ENTRY} 字节，超出部分在
+     * 流式阶段直接停止读取（ZipFile 关闭条目时丢弃残余），保持"截断读取"语义，
+     * 高压缩比条目不会先撑爆堆内存。
+     * @param zf   已打开的 zip 文件
+     * @param name 条目名
+     * @return 条目解压字节，长度不超过 {@link #MAX_ENTRY}
+     * @throws IOException 条目缺失或解压 IO 失败时抛出
+     */
     private static byte[] readEntry(ZipFile zf, String name) throws IOException {
         ZipEntry e = zf.getEntry(name);
         if (e == null) throw new IOException("压缩包缺少 " + name);
-        try (InputStream in = zf.getInputStream(e); ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
-            in.transferTo(bos);
-            return bos.toByteArray();
+        try (InputStream in = zf.getInputStream(e)) {
+            return readCapped(in, MAX_ENTRY);
         }
+    }
+
+    /**
+     * 编辑类场景的严格有界条目读取：条目必须完整，解压字节超过
+     * {@link #MAX_ENTRY} 立即抛错（截断会损坏文档结构），上限在流式读取阶段生效。
+     * @param zf 已打开的 zip 文件
+     * @param e  目标条目
+     * @return 完整条目字节
+     * @throws IOException 条目解压后超过 20MB 或 IO 失败时抛出
+     */
+    private static byte[] readEntryStrict(ZipFile zf, ZipEntry e) throws IOException {
+        try (InputStream in = zf.getInputStream(e)) {
+            // 多读 1 字节用于探测超限，避免把超长条目完整读入后再判断
+            byte[] b = readCapped(in, MAX_ENTRY + 1);
+            if (b.length > MAX_ENTRY) throw new IOException("条目过大（超过 20MB）：" + e.getName());
+            return b;
+        }
+    }
+
+    /**
+     * 边解压边计数的流式拷贝：达到上限立即停止，杜绝 transferTo 全量入内存
+     * 导致的 zip 炸弹 OOM。
+     * @param in  zip 条目解压输入流
+     * @param cap 最多读取字节数
+     * @return 实际读取的字节（长度 ≤ cap）
+     * @throws IOException 读取过程发生 IO 错误时抛出
+     */
+    private static byte[] readCapped(InputStream in, int cap) throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream(Math.min(cap, 64 * 1024));
+        byte[] buf = new byte[16 * 1024];
+        int remaining = cap;
+        int n;
+        while (remaining > 0 && (n = in.read(buf, 0, Math.min(buf.length, remaining))) != -1) {
+            bos.write(buf, 0, n);
+            remaining -= n;
+        }
+        return bos.toByteArray();
+    }
+
+    /**
+     * 有界枚举 zip 条目：条目数超过 {@link #MAX_ENTRIES} 立即判定为恶意包，
+     * 避免 {@code Collections.list} 把海量中央目录项全部物化进内存。
+     * @param zf 已打开的 zip 文件
+     * @return 全部条目（数量 ≤ {@link #MAX_ENTRIES}）
+     * @throws IOException 条目数超过上限时抛出
+     */
+    private static List<ZipEntry> entriesBounded(ZipFile zf) throws IOException {
+        List<ZipEntry> out = new ArrayList<>();
+        Enumeration<? extends ZipEntry> en = zf.entries();
+        while (en.hasMoreElements()) {
+            out.add(en.nextElement());
+            if (out.size() > MAX_ENTRIES)
+                throw new IOException("压缩包条目数超过上限（" + MAX_ENTRIES + "），疑似压缩炸弹。");
+        }
+        return out;
     }
 
     private static int slideNum(String n) {

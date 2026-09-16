@@ -24,7 +24,9 @@ public final class ConvCellRenderer extends JPanel implements ListCellRenderer<S
     @Override
     public Component getListCellRendererComponent(JList<? extends String> list, String value, int index,
                                                   boolean selected, boolean focused) {
-        title.setText(value == null ? "" : value);
+        // 会话标题由模型生成，必须 HTML 转义：以 "<html>" 开头的标题会被 JLabel
+        // 按 HTML 渲染，造成标签注入/样式伪造（转义后不再以 <html> 字面量开头）
+        title.setText(value == null ? "" : Html.esc(value));
         title.setForeground(selected ? UiTheme.TEXT : UiTheme.TEXT_MUTED);
         title.setFont(UiTheme.font(13, selected ? Font.BOLD : Font.PLAIN));
         putClientProperty("selected", selected);

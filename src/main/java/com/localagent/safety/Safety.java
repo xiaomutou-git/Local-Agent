@@ -20,13 +20,68 @@ import java.util.regex.Pattern;
 public final class Safety {
     private Safety() {}
 
-    // ---- 路径常量 ----
+    // ---- 路径常量（按本机系统盘/系统目录动态解析，系统盘非 C: 时保护同样生效）----
+    /** 系统盘符（取 SystemDrive 环境变量，非法/缺失时回退 C:），如 "C:"。 */
+    private static final String SYSTEM_DRIVE = initSystemDrive();
+    /** Windows 目录（取 SystemRoot/windir，缺失时回退 <系统盘>\Windows）。 */
+    private static final String WINDOWS_DIR = initWindowsDir();
+
     private static final List<String> HARD_DENY_DIRS = List.of(
-            "C:\\boot", "C:\\Windows\\System32", "C:\\Windows\\SysWOW64",
-            "C:\\Windows\\WinSxS", "C:\\Windows\\assembly", "C:\\Windows\\CSC",
-            "C:\\Windows\\drivers", "C:\\$Recycle.Bin");
+            lowerPath(SYSTEM_DRIVE + "\\boot"),
+            lowerPath(WINDOWS_DIR + "\\System32"),
+            lowerPath(WINDOWS_DIR + "\\SysWOW64"),
+            lowerPath(WINDOWS_DIR + "\\WinSxS"),
+            lowerPath(WINDOWS_DIR + "\\assembly"),
+            lowerPath(WINDOWS_DIR + "\\CSC"),
+            lowerPath(WINDOWS_DIR + "\\drivers"),
+            lowerPath(SYSTEM_DRIVE + "\\$Recycle.Bin"));
     private static final List<String> PROTECTED_DIRS = List.of(
-            "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)", "C:\\ProgramData");
+            lowerPath(WINDOWS_DIR),
+            envPath("ProgramFiles", SYSTEM_DRIVE + "\\Program Files"),
+            envPath("ProgramFiles(x86)", SYSTEM_DRIVE + "\\Program Files (x86)"),
+            envPath("ProgramData", SYSTEM_DRIVE + "\\ProgramData"));
+
+    /**
+     * 解析系统盘符。
+     * @return 形如 "C:" 的大写盘符；SystemDrive 缺失或非法时回退 "C:"
+     */
+    private static String initSystemDrive() {
+        String d = System.getenv("SystemDrive");
+        if (d != null && d.matches("(?i)^[A-Za-z]:$"))
+            return d.substring(0, 1).toUpperCase(Locale.ROOT) + ":";
+        return "C:";
+    }
+
+    /**
+     * 解析 Windows 系统目录。
+     * @return 规范化的系统目录绝对路径（如 C:\Windows）；环境变量缺失时回退系统盘默认路径
+     */
+    private static String initWindowsDir() {
+        String root = System.getenv("SystemRoot");
+        if (root == null || root.isBlank()) root = System.getenv("windir");
+        if (root == null || root.isBlank()) root = SYSTEM_DRIVE + "\\Windows";
+        return Paths.get(root).normalize().toString();
+    }
+
+    /**
+     * 路径统一小写并把斜杠归一为反斜杠（与 isInside 的比较形态一致）。
+     * @param p 原始路径
+     * @return 小写、反斜杠分隔的路径
+     */
+    private static String lowerPath(String p) {
+        return p.toLowerCase(Locale.ROOT).replace('/', '\\');
+    }
+
+    /**
+     * 取环境变量指向的目录并归一化；缺失/空白时使用回退值。
+     * @param env      环境变量名（如 ProgramFiles）
+     * @param fallback 环境变量不可用时的默认路径
+     * @return 小写、反斜杠分隔的目录路径
+     */
+    private static String envPath(String env, String fallback) {
+        String v = System.getenv(env);
+        return lowerPath((v == null || v.isBlank()) ? fallback : v);
+    }
     private static final Set<String> HARD_DENY_FILES = new HashSet<>(List.of(
             "bootmgr", "BOOTNXT", "ntldr", "ntdetect.com", "boot.ini", "autoexec.bat", "config.sys",
             "pagefile.sys", "hiberfil.sys", "swapfile.sys", "config"));
@@ -78,6 +133,21 @@ public final class Safety {
             "reg", "regedit", "regsvr32", "rundll32", "wmic", "cipher", "fsutil", "bcdedit", "cacls", "icacls",
             "takeown", "runas", "sc", "net", "schtasks", "at", "mshta", "certutil", "bitsadmin", "ftp", "tftp",
             "curl", "wget", "powershell", "powershell.exe", "pwsh", "wscript", "cscript", "wsl", "bash"));
+
+    // control.exe 允许打开的系统自带 CPL 白名单（仅文件名精确匹配，禁止带路径；
+    // .msc 管理单元不在内——其宿主是 mmc.exe，不在白名单，避免 control evil.cpl 加载任意 DLL）
+    private static final Set<String> CONTROL_CPL = new HashSet<>(List.of(
+            "inetcpl.cpl", "sysdm.cpl", "appwiz.cpl", "ncpa.cpl", "powercfg.cpl", "timedate.cpl",
+            "intl.cpl", "desk.cpl", "mmsys.cpl", "firewall.cpl", "wscui.cpl", "main.cpl",
+            "odbccp32.cpl", "sapi.cpl", "tabletpc.cpl", "telephon.cpl", "joy.cpl",
+            "color.cpl", "collab.cpl"));
+
+    // 资源管理器参数中的 URL 形态（任意 scheme:// 外联都拒绝：http/https/ftp/file...）
+    private static final Pattern URL_SCHEME_RE = Pattern.compile("^[a-z][a-z0-9+.-]*://", Pattern.CASE_INSENSITIVE);
+    // cmd 变量展开形态：%VAR%（常规展开）与 !VAR!（延迟展开），可借 %COMSPEC% 绕过首词匹配
+    private static final Pattern VAR_EXPANSION_RE = Pattern.compile("%[^%\\s]{1,64}%|![^!\\s]{1,64}!", Pattern.CASE_INSENSITIVE);
+    // 从命令段中按空白提取词（引号内容作为一个词）
+    private static final Pattern WORD_RE = Pattern.compile("\"([^\"]*)\"|(\\S+)");
 
     private static final Set<String> SENSITIVE_DIR_PARTS = new HashSet<>(
             List.of(".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure"));
@@ -210,22 +280,125 @@ public final class Safety {
     }
 
     /**
-     * 扫描 cmd /c 后各段命令的首词：危险动词或非白名单程序一律阻止。
-     * @return 命中的词；null 表示通过
+     * 扫描 cmd /c 后各段命令：先做反注入预处理，再校验首词与白名单程序参数。
+     * 执行逻辑：按 &amp; / && / | / || 切段 -> 折叠 ^ 转义（c^m^d→cmd）->
+     * 拒绝 %VAR%/!VAR! 展开 -> 拒绝未引号包裹的重定向符（>/</>>，防未校验写副作用）
+     * -> 首词危险动词/非白名单即阻止 -> explorer/control 段额外做参数白名单校验。
+     * @param tokens cmd /c 之后的参数（可能多段拼在一个字符串元素内）
+     * @return 命中的危险词/操作描述；null 表示全部通过
      */
     private static String scanCmdTokens(List<String> tokens) {
         String joined = String.join(" ", tokens);
-        String[] segs = joined.split("\\s*&&\\s*|\\s*&\\s*|\\s*\\|\\s*");
+        String[] segs = joined.split("\\s*&&\\s*|\\s*&\\s*|\\s*\\|\\|?\\s*");
         for (String seg0 : segs) {
-            String seg = seg0.trim();
+            String seg = foldCaret(seg0).trim();
             if (seg.isEmpty()) continue;
-            String first = seg.split("\\s+")[0].replaceAll("^[\"']|[\"']$", "");
+            // 环境变量展开可用于绕过首词匹配（%COMSPEC% /c ...），白名单只读命令无需变量
+            var em = VAR_EXPANSION_RE.matcher(seg);
+            if (em.find()) return "环境变量展开 " + em.group();
+            // 重定向（> >> <，含 2>、2>&1）产生未校验的文件写入/UNC 强制认证，一律阻止
+            if (hasRedirect(seg)) return "输出/输入重定向";
+            List<String> words = splitWords(seg);
+            if (words.isEmpty()) continue;
+            String first = words.get(0);
             if (first.isEmpty()) continue;
             String key = first.toLowerCase(Locale.ROOT).replaceAll("\\.(exe|com)$", "");
             int slash = Math.max(key.lastIndexOf('\\'), key.lastIndexOf('/'));
             if (slash >= 0) key = key.substring(slash + 1);
             if (CMD_DANGER.contains(key)) return key;
             if (!CMD_INTERNAL.contains(key) && !ALLOW_PROGRAMS.contains(key)) return key;
+            // cmd /c explorer ... / control ... 与直接调用走同一套参数审查
+            if ("explorer".equals(key) || "control".equals(key)) {
+                String bad = checkShellLauncherArgs(key, words.subList(1, words.size()));
+                if (bad != null) return key + " " + bad;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 折叠 cmd 的 ^ 转义符（引号外）。cmd 中 ^ 会取消下一字符的特殊含义，
+     * 因此 c^m^d /c 实际等价 cmd /c，可绕过首词匹配；引号内 ^ 为字面量，保留。
+     * @param s 原始命令段
+     * @return 折叠后的命令段
+     */
+    private static String foldCaret(String s) {
+        StringBuilder out = new StringBuilder(s.length());
+        boolean inQuote = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '"') inQuote = !inQuote;
+            if (!inQuote && c == '^' && i + 1 < s.length()) {
+                // 被转义的字符原样输出；若它是引号，不计入引号配对（cmd 中 ^" 不开启引用段）
+                out.append(s.charAt(++i));
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
+    /**
+     * 判断命令段是否存在引号外的重定向符（&lt;、&gt;，覆盖 &gt;&gt;、2&gt;、2&gt;&amp;1）。
+     * @param seg 已折叠 ^ 转义的命令段
+     * @return 存在未加引号的重定向符返回 true
+     */
+    private static boolean hasRedirect(String seg) {
+        boolean inQuote = false;
+        for (int i = 0; i < seg.length(); i++) {
+            char c = seg.charAt(i);
+            if (c == '"') inQuote = !inQuote;
+            else if (!inQuote && (c == '<' || c == '>')) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 按空白拆分命令词，双引号包裹的内容作为一个词并去掉引号。
+     * @param seg 命令段
+     * @return 有序词列表（无词时为空表）
+     */
+    private static List<String> splitWords(String seg) {
+        List<String> out = new ArrayList<>();
+        var m = WORD_RE.matcher(seg);
+        while (m.find()) out.add(m.group(1) != null ? m.group(1) : m.group(2));
+        return out;
+    }
+
+    /**
+     * explorer/control 参数白名单审查（二者虽在允许名单，但可被参数借道执行/外联）。
+     * explorer：拒绝 URL（任意 scheme://，防外联）、UNC 路径（\\server 防 NTLM 强制认证）、
+     * 可执行扩展名目标（explorer 会经 ShellExecute 直接运行 exe/bat/lnk 等）；
+     * control：无参允许，参数仅允许 {@link #CONTROL_CPL} 中的纯文件名（防加载任意 CPL/DLL）。
+     * @param key  程序键名（explorer 或 control）
+     * @param args 除程序名外的参数列表
+     * @return 命中的非法参数说明；null 表示通过
+     */
+    private static String checkShellLauncherArgs(String key, List<String> args) {
+        if ("control".equals(key)) {
+            for (String a0 : args) {
+                String a = a0.trim();
+                if (a.isEmpty()) continue;
+                if (!CONTROL_CPL.contains(a.toLowerCase(Locale.ROOT)))
+                    return "参数「" + a + "」不在系统 CPL 白名单，禁止 control 加载";
+            }
+            return null;
+        }
+        // explorer：剥离开关注释（/e,/n,/root,/select,/separate 等，以逗号连接目标）
+        for (String a0 : args) {
+            String a = a0.trim();
+            String low = a.toLowerCase(Locale.ROOT);
+            if (low.startsWith("/")) {
+                int comma = a.indexOf(',');
+                a = comma >= 0 ? a.substring(comma + 1).trim() : "";
+            }
+            if (a.isEmpty()) continue;
+            if (URL_SCHEME_RE.matcher(a).find())
+                return "URL/外联参数「" + a + "」被禁止";
+            if (a.startsWith("\\") || a.startsWith("//"))
+                return "UNC/网络路径参数「" + a + "」被禁止";
+            if (isExecFile(a))
+                return "可执行文件参数「" + a + "」会被资源管理器直接运行，禁止";
         }
         return null;
     }
@@ -242,6 +415,12 @@ public final class Safety {
         if (DENY_PROGRAMS.contains(name) || DENY_PROGRAMS.contains(
                 new File(base).getName().toLowerCase(Locale.ROOT).replaceAll("\\.(exe|com|bat|cmd|ps1)$", ""))) {
             return CheckResult.blocked("程序 " + base + " 被列入禁止名单，不允许执行。");
+        }
+        // explorer/control 虽在允许名单，但参数可借道执行任意可执行文件/外联/加载任意 CPL，
+        // 必须在放行前做参数白名单审查（与 cmd /c 子段扫描共用同一判定）
+        if ("explorer".equals(name) || "control".equals(name)) {
+            String badArg = checkShellLauncherArgs(name, argv == null ? List.of() : argv);
+            if (badArg != null) return CheckResult.blocked(badArg + "。");
         }
         String baseName = new File(base).getName().toLowerCase(Locale.ROOT);
         if (PROXY_PROGRAMS.contains(baseName)) {

@@ -410,7 +410,10 @@ public final class ChatPane extends JPanel {
             boolean showArgs = ("pending".equals(this.status) || "running".equals(this.status))
                     && preview != null && !preview.isBlank();
             if (showArgs) {
-                previewLabel.setText(preview.length() > 90 ? preview.substring(0, 90) + "…" : preview);
+                // preview 为模型可控的工具参数 JSON，先 HTML 转义再截断，
+                // 防止 "<html>" 开头触发 JLabel 的 HTML 解析（标签注入/样式伪造）
+                String safe = Html.esc(preview);
+                previewLabel.setText(safe.length() > 90 ? safe.substring(0, 90) + "…" : safe);
                 previewLabel.setVisible(true);
             } else {
                 previewLabel.setVisible(false);

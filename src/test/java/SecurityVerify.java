@@ -55,6 +55,44 @@ public class SecurityVerify {
         t(".chm 识别为可执行", Safety.isExecFile("x.chm"));
         t("open_file .hta 升级命令检查", "dangerous".equals(Safety.checkTool("open_file", "confirm", args("path", "D:\\x\\payload.hta")).risk()));
 
+        System.out.println("== V-03 explorer/control 参数借道 ==");
+        t("explorer 直接运行 exe 被阻止", Safety.checkTool("run_command", "dangerous",
+                args("program", "explorer", "args", List.of("C:\\Users\\u\\evil.exe"))).blocked());
+        t("explorer 打开 URL 外联被阻止", Safety.checkTool("run_command", "dangerous",
+                args("program", "explorer", "args", List.of("https://evil.com/x"))).blocked());
+        t("explorer /select 携带 exe 被阻止", Safety.checkTool("run_command", "dangerous",
+                args("program", "explorer", "args", List.of("/select,C:\\x\\evil.exe"))).blocked());
+        t("explorer UNC 路径被阻止", Safety.checkTool("run_command", "dangerous",
+                args("program", "explorer", "args", List.of("\\\\dc\\share"))).blocked());
+        t("explorer 打开普通目录放行", !Safety.checkTool("run_command", "dangerous",
+                args("program", "explorer", "args", List.of("C:\\Users\\u\\Documents"))).blocked());
+        t("control 无参放行", !Safety.checkTool("run_command", "dangerous",
+                args("program", "control")).blocked());
+        t("control 白名单 CPL 放行", !Safety.checkTool("run_command", "dangerous",
+                args("program", "control", "args", List.of("inetcpl.cpl"))).blocked());
+        t("control 任意 CPL 被阻止", Safety.checkTool("run_command", "dangerous",
+                args("program", "control", "args", List.of("evil.cpl"))).blocked());
+        t("control /name 形式被阻止", Safety.checkTool("run_command", "dangerous",
+                args("program", "control", "args", List.of("/name", "Microsoft.DevicesAndPrinters"))).blocked());
+        t("cmd /c explorer URL 借道被阻止", Safety.checkTool("run_command", "dangerous",
+                args("program", "cmd", "args", List.of("/c", "explorer https://evil.com"))).blocked());
+
+        System.out.println("== V-04 cmd 解析绕过（重定向/^转义/变量展开）==");
+        t("cmd 重定向写文件被阻止", Safety.checkTool("run_command", "dangerous",
+                args("program", "cmd", "args", List.of("/c", "whoami > C:\\a.txt"))).blocked());
+        t("cmd ^ 转义危险动词被阻止", Safety.checkTool("run_command", "dangerous",
+                args("program", "cmd", "args", List.of("/c", "d^e^l C:\\a"))).blocked());
+        t("cmd %COMSPEC% 变量展开被阻止", Safety.checkTool("run_command", "dangerous",
+                args("program", "cmd", "args", List.of("/c", "%COMSPEC% /c whoami"))).blocked());
+        t("cmd 管道内 explorer exe 借道被阻止", Safety.checkTool("run_command", "dangerous",
+                args("program", "cmd", "args", List.of("/c", "dir | explorer C:\\x\\a.exe"))).blocked());
+
+        System.out.println("== V-06 动态系统盘保护 ==");
+        String sysDrive = System.getenv("SystemDrive");
+        if (sysDrive == null || sysDrive.isBlank()) sysDrive = "C:";
+        t("按 SystemDrive 动态保护 System32 写入", Safety.checkTool("write_file", "confirm",
+                args("path", sysDrive + "\\Windows\\System32\\h.dll")).blocked());
+
         System.out.println("== L-12 路径规范化 ==");
         String layered = "\\\\?\\" + "\\\\?\\" + "C:\\x"; // 实际字符串：\\?\\?\C:\x（叠层前缀）
         t("叠层 \\\\?\\ 前缀剥离", Safety.normalizePath(layered) != null);

@@ -94,7 +94,7 @@ if (-not $SkipTests) {
     $rout | Select-Object -Last 2 | Out-Host
     if ($rcode -ne 0) { $rout | Out-Host; throw "$t 回归失败" }
   }
-  Write-Host '  全部回归通过（安全 24 / Office 7 / 数据层 7 / MCP 合并 35 / MCP stdio 49 / 本地环境 25 / 进程管道 6 / 时间工具 10 / 会话导出 8 / 知识索引 9 / 单实例 3，共 183）' -ForegroundColor Green
+  Write-Host '  全部回归通过（安全 39 / Office 30 / 数据层 7 / MCP 合并 35 / MCP stdio 49 / 本地环境 25 / 进程管道 6 / 时间工具 10 / 会话导出 8 / 知识索引 9 / 单实例 3，共 221）' -ForegroundColor Green
 } else {
   Write-Host '[2/5] 跳过测试' -ForegroundColor Yellow
 }

@@ -2,9 +2,11 @@ import com.localagent.office.Office;
 import com.localagent.toolkit.ToolResult;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.stream.Stream;
+import java.util.zip.*;
 
 /**
  * Office OOXML 生成/读取烟测：xlsx/docx/pptx 生成 -> 读回校验关键字。
@@ -44,6 +46,35 @@ public class OfficeVerify {
     static void cleanupOnExit(Path dir) {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> deleteRecursively(dir), "test-cleanup"));
     }
+
+    /** 测试用 1MiB 常量（zip 炸弹构造按 MB 计）。 */
+    private static final int MB = 1024 * 1024;
+
+    /**
+     * 按给定顺序构造 zip 容器（OOXML 本质即 zip），全部条目 DEFLATED 压缩。
+     * 填充内容为全零字节：高压缩比，压缩后只有几 KB，可在极小磁盘开销下
+     * 模拟解压放大（zip 炸弹）。
+     * @param zip     目标 zip 路径
+     * @param entries 有序条目映射（键=条目名，值=未压缩字节），null 条目跳过
+     * @throws IOException 创建/写入 zip 失败时抛出
+     */
+    static void writeZip(Path zip, Map<String, byte[]> entries) throws IOException {
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zip))) {
+            for (Map.Entry<String, byte[]> e : entries.entrySet()) {
+                if (e.getValue() == null) continue;
+                zos.putNextEntry(new ZipEntry(e.getKey()));
+                zos.write(e.getValue());
+                zos.closeEntry();
+            }
+        }
+    }
+
+    /**
+     * 生成全零字节数组（高压缩比填充）。
+     * @param n 字节数（允许取值 0..100MiB，测试内不做越界保护，交由 JVM 抛 OOM 暴露问题）
+     * @return 长度为 n 的全零数组
+     */
+    static byte[] zeros(int n) { return new byte[n]; }
 
     public static void main(String[] args) throws Exception {
         Office office = new Office();
@@ -161,6 +192,56 @@ public class OfficeVerify {
         wrongExt.put("slides", List.of(Map.of("title", "x")));
         t("错误扩展名报错", !office.editPpt(wrongExt).ok());
         t("无任何编辑动作报错", !office.editXlsx(Map.of("path", xlsx2.toString())).ok());
+
+        // ================= V-01 zip 炸弹防护（流式闸门：单条目 / 条目数 / 累计量）=================
+        // 正常追加参数（必须通过危险内容检查后才会走到 zip 读取层，确保错误来自炸弹闸门）
+        List<Map<String, Object>> safeAppend = List.of(Map.of("type", "para", "text", "正常追加文本"));
+
+        // 1) 单条目解压 20MB+1：编辑路径严格读取，读到第 20MB+1 字节即抛错（不会先全量入内存）
+        Path bombEntry = dir.resolve("bomb-entry.docx");
+        Map<String, byte[]> be = new LinkedHashMap<>();
+        be.put("word/document.xml", zeros(20 * MB + 1));
+        writeZip(bombEntry, be);
+        ToolResult br1 = office.editDocx(Map.of("path", bombEntry.toString(), "paragraphs", safeAppend));
+        t("zip 炸弹：单条目解压超 20MB 被硬拒（不 OOM）",
+                !br1.ok() && br1.error() != null && br1.error().contains("20MB"));
+
+        // 2) 1 个正常文档条目 + 10000 个垃圾条目（共 10001）：枚举阶段即拒
+        Path bombCount = dir.resolve("bomb-count.docx");
+        Map<String, byte[]> bc = new LinkedHashMap<>();
+        bc.put("word/document.xml", "<w:document/>".getBytes(StandardCharsets.UTF_8));
+        for (int i = 0; i < 10_000; i++) bc.put("junk/e" + i + ".bin", new byte[]{0});
+        writeZip(bombCount, bc);
+        ToolResult br2 = office.editDocx(Map.of("path", bombCount.toString(), "paragraphs", safeAppend));
+        t("zip 炸弹：条目数超 1 万被硬拒",
+                !br2.ok() && br2.error() != null && br2.error().contains("条目数"));
+
+        // 3) 6 个 17MB 条目（单条均未超 20MB，累计 102MB > 100MB 总闸）：累计量闸门拒绝
+        Path bombTotal = dir.resolve("bomb-total.docx");
+        Map<String, byte[]> bt = new LinkedHashMap<>();
+        bt.put("word/document.xml", "<w:document/>".getBytes(StandardCharsets.UTF_8));
+        for (int i = 0; i < 6; i++) bt.put("junk/big" + i + ".bin", zeros(17 * MB));
+        writeZip(bombTotal, bt);
+        ToolResult br3 = office.editDocx(Map.of("path", bombTotal.toString(), "paragraphs", safeAppend));
+        t("zip 炸弹：累计解压超 100MB 被硬拒",
+                !br3.ok() && br3.error() != null && br3.error().contains("100MB"));
+
+        // 4) 读取路径 25MB 单幻灯片：保持"截断到 20MB"语义，成功返回且不崩溃
+        Path bombRead = dir.resolve("bomb-read.pptx");
+        Map<String, byte[]> brmap = new LinkedHashMap<>();
+        brmap.put("[Content_Types].xml", "<Types/>".getBytes(StandardCharsets.UTF_8));
+        brmap.put("ppt/slides/slide1.xml", zeros(25 * MB));
+        writeZip(bombRead, brmap);
+        ToolResult br4 = office.readOffice(Map.of("path", bombRead.toString()));
+        t("读取路径 25MB 单条目按 20MB 截断不崩溃", br4.ok());
+
+        // ================= V-02 createPpt 危险内容拦截 =================
+        Map<String, Object> badPpt = new LinkedHashMap<>();
+        badPpt.put("path", dir.resolve("bad.pptx").toString());
+        badPpt.put("slides", List.of(Map.of("title", "正常标题",
+                "bullets", List.of("powershell -c Invoke-Expression"))));
+        ToolResult r5 = office.createPpt(badPpt);
+        t("危险 pptx 生成被拦截（V-02）", !r5.ok() && r5.error() != null && r5.error().contains("危险"));
 
         // 临时文件由退出钩子统一递归清理（含 bad.docx、*.bak、*.tmp 与目录本身）
 
