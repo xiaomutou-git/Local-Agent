@@ -110,6 +110,20 @@ public class OllamaBootstrapVerify {
         t("humanSize MB 格式", OllamaEnv.humanSize(512L * 1024 * 1024).contains("MB"));
         t("humanSize 负值不报错", OllamaEnv.humanSize(-1).contains("KB"));
 
+        System.out.println("== 下载失败原因中文化（反射覆盖 private networkReason）==");
+        java.lang.reflect.Method nr = Class.forName("com.localagent.ollama.OllamaSetup")
+                .getDeclaredMethod("networkReason", Throwable.class);
+        nr.setAccessible(true);
+        String r1 = (String) nr.invoke(null, new java.net.UnknownHostException("ollama.com"));
+        t("UnknownHost 归类为 DNS/无网络", r1.contains("DNS"));
+        String r2 = (String) nr.invoke(null, new java.net.ConnectException("Connection refused"));
+        t("ConnectException 归类为连接被拒绝", r2.contains("连接被拒绝"));
+        String r3 = (String) nr.invoke(null,
+                new RuntimeException("下载失败，HTTP 状态码 404", null));
+        t("HTTP 错误保留状态码信息", r3.contains("404"));
+        String r4 = (String) nr.invoke(null, (Throwable) null);
+        t("null 异常回退通用文案，不抛 NPE", r4.contains("网络异常"));
+
         System.out.println();
         System.out.println("结果：" + pass + " 通过 / " + fail + " 失败");
         System.exit(fail > 0 ? 1 : 0);

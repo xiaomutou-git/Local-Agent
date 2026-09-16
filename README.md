@@ -68,8 +68,31 @@ MCP stdio 49/49、本地环境探测 25/25、进程管道 6/6、时间工具 10/
 会话导出 8/8、知识库索引 9/9、单实例锁 3/3、Ollama 引导 38/38（共 259 项）**；
 构建产物 `dist\本机助手\runtime` 内置完整运行时（JDK 带 jmods 时优先 jlink
 裁剪，否则复制 JBR），目标机器无需安装 JDK；`本机助手.exe`/`卸载.exe` 由系统自带
-.NET Framework 4 的 csc 编译，目标机器 Win7 及以上免装运行库；
+.NET Framework 4 的 csc 编译，Windows 10/11 出厂自带该运行库、无需另装；
 生产代码另以 `-Xlint:all` 编译保持 **0 error / 0 warning**。
+
+## 目标机器要求（零环境兼容性）
+
+已按"全新 Windows、未安装任何开发环境"场景做过依赖闭环验证（PE 导入表实证）：
+
+| 外部依赖 | 是否需要用户预装 | 说明 |
+| --- | --- | --- |
+| JDK / JRE | **不需要** | 分发目录内置完整 JBR 21（`runtime/`），目标机无 Java 也能运行 |
+| VC++ 运行库 | **不需要** | JBR 已在 `runtime/bin` 自带 vcruntime140.dll、vcruntime140_1.dll、msvcp140.dll、ucrtbase.dll |
+| .NET 运行时 | **不需要** | exe 启动器/卸载器基于 .NET Framework 4（Windows 10/11 出厂自带 4.6/4.8）；非 .NET Core |
+| SQLite 驱动 | **不需要** | sqlite-jdbc 已内嵌 Windows x86_64 native，仅依赖系统 msvcrt.dll（Windows 自带） |
+| PowerShell | 系统自带 | Win10/11 内置 5.1（签名校验、卸载自清理使用，已带 `-ExecutionPolicy Bypass`） |
+| 解压工具 | 系统自带 | 标准 zip，资源管理器右键"全部解压"即可 |
+| Ollama | **首次启动自动安装** | 见下节；需联网下载安装器（约 800MB）与模型（0.4~9GB） |
+
+**系统版本**：Windows 10/11 64 位开箱即用；Windows 11 ARM64 可经 x64 模拟运行；
+CPU 推理无需显卡/N 卡驱动。无需管理员权限（Ollama 采用用户级安装到 `%LOCALAPPDATA%`）。
+
+两个已知提示（非故障）：
+- **SmartScreen 首次拦截**：exe 未购买商业代码签名证书，首次双击可能出现
+  "Windows 已保护你的电脑"，点「更多信息」→「仍要运行」即可；
+- **网络要求**：安装器从 ollama.com 下载（会重定向到官方 CDN/GitHub Release），
+  模型从 Ollama 官方仓库拉取；网络受限时可点引导窗口的「手动下载/说明」自行安装后重启。
 
 ## 首次启动引导（自动安装 Ollama 与适配模型）
 

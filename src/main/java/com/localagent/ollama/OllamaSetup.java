@@ -140,8 +140,17 @@ public final class OllamaSetup {
 
         l.stage("正在从 " + OllamaEnv.SETUP_SOURCE + " 下载安装器…");
         l.progress(0, "准备连接 ollama.com");
-        OllamaEnv.download(OllamaEnv.SETUP_URL, installer, ratio ->
-                l.progress(ratio, ratio < 0 ? "下载中…" : "已下载 " + Math.round(ratio * 100) + "%"));
+        try {
+            OllamaEnv.download(OllamaEnv.SETUP_URL, installer, ratio ->
+                    l.progress(ratio, ratio < 0 ? "下载中…" : "已下载 " + Math.round(ratio * 100) + "%"));
+        } catch (InterruptedException ie) {
+            throw ie;
+        } catch (Exception dl) {
+            // 干净机器上最常见的失败是网络不通/受限：把英文底层异常翻译成可执行的中文指引，
+            // 让用户知道可以走「手动下载/说明」而不是对着一串技术报错无从下手
+            throw new IllegalStateException("无法从 ollama.com 下载安装器（" + networkReason(dl)
+                    + "）。请检查网络连接，或点击「手动下载/说明」用浏览器自行下载安装 Ollama 后重启本程序。", dl);
+        }
         l.throwIfCancelled();
 
         l.stage("正在校验安装器数字签名…");
@@ -253,7 +262,29 @@ public final class OllamaSetup {
             throw new IllegalStateException("模型拉取超过 30 分钟无响应，已中止。可稍后重试（支持断点续传）。");
         }
         if (p.exitValue() != 0)
-            throw new IllegalStateException("ollama pull 失败（退出码 " + p.exitValue() + "），请检查网络后重试。");
+            throw new IllegalStateException("ollama pull 失败（退出码 " + p.exitValue()
+                    + "）。请检查网络后重试（模型仓库较大，访问受限时也会失败；已下载部分支持断点续传）。");
+    }
+
+    /**
+     * 沿异常因果链提取首个与网络相关的根因，归类为简短中文短语。
+     * @param t 下载过程抛出的异常，允许为 null
+     * @return 中文原因短语（连接失败/超时/证书问题/HTTP 错误/下载被中断）；无法归类时给通用文案
+     */
+    private static String networkReason(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            String n = c.getClass().getSimpleName();
+            String m = c.getMessage() == null ? "" : c.getMessage();
+            if (c instanceof java.net.UnknownHostException) return "无法解析域名（DNS 失败或无网络连接）";
+            if (c instanceof java.net.ConnectException) return "连接被拒绝或网络不可达";
+            if (c instanceof java.net.SocketTimeoutException
+                    || c instanceof java.net.http.HttpTimeoutException) return "连接超时";
+            if (c instanceof javax.net.ssl.SSLException
+                    || c instanceof java.security.cert.CertificateException) return "TLS 证书校验失败";
+            if (m.startsWith("下载失败，HTTP")) return m;
+            if (n.contains("ConnectException") || n.contains("UnknownHost")) return "网络连接失败";
+        }
+        return "网络异常";
     }
 
     /**
