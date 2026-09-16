@@ -217,9 +217,12 @@ public class Agent {
             int steps = 0;
             while (steps++ < maxSteps) {
                 if (stopRequested) { appendAssistantText("已停止。"); break; }
+                // chatOnce() 内部已把完整 assistant 消息（content 全文 + tool_calls）写入 history，
+                // 此处严禁再追加一次 turn.content：appendAssistantText 会合并到最后一条 assistant
+                // （即刚写入的同一条），导致回复在持久化历史中重复两遍，进而污染下一轮模型上下文、
+                // 使会话重载与 Markdown 导出出现重复文本。appendAssistantText 仅用于"已停止/出错/
+                // 达步数上限"等不经过 chatOnce 落库的合成提示。
                 ChatTurn turn = chatOnce();
-                String content = turn.content;
-                if (content != null && !content.isBlank()) appendAssistantText(content);
                 if (turn.calls.isEmpty()) break;
                 for (ToolCall call : turn.calls) {
                     if (stopRequested) break;
