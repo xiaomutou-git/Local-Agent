@@ -1,3 +1,36 @@
+本项目「本机助手（Local-Agent）」在 Apache License 2.0 之上附加 Commons Clause v1.0 条件，
+以 Apache-2.0 为基础许可、Commons Clause 为额外限制（核心为禁止销售本软件）。
+The Software is licensed under the Apache License, Version 2.0, as modified by the
+Commons Clause License Condition v1.0 set forth below. The full Apache License 2.0
+text follows thereafter.
+
+==============================
+"Commons Clause" License Condition v1.0
+==============================
+
+The Software is provided to you by the Licensor under the Apache License, Version 2.0,
+as modified by the following condition. Without limiting the foregoing condition, the
+following condition shall apply to the Software and shall be deemed incorporated into
+the License.
+
+Without limiting other conditions in the License, the grant of rights under the License
+will not include, and the License does not grant to you, the right to Sell the Software.
+
+For purposes of the foregoing, "Sell" means practicing any or all of the rights granted
+to you under the License to provide to third parties, for a fee or other consideration
+(including without limitation fees for hosting or consulting/support services related to
+the Software), a product or service whose value derives, entirely or substantially, from
+the functionality of the Software. Any license notice or attribution required by the
+License must also include this Commons Clause License Condition notice.
+
+Software: 本机助手（Local-Agent）
+License: Apache License 2.0 with Commons Clause v1.0
+Licensor: 小木头
+
+==============================
+Apache License, Version 2.0（基础许可全文）
+==============================
+
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
